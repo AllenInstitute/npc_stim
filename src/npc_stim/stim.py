@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import datetime
 import io
 import logging
@@ -16,15 +15,15 @@ import numpy as np
 import numpy.typing as npt
 from typing_extensions import TypeAlias
 
-
 StimPathOrDataset: TypeAlias = Union[npc_io.PathLike, h5py.File, Mapping]
 
 logger = logging.getLogger(__name__)
 
+
 def get_stim_data(stim_path: StimPathOrDataset, **kwargs) -> h5py.File | dict:
     if isinstance(stim_path, h5py.File):
         return stim_path
-    if isinstance(stim_path, Mapping): # ie. from pkl file
+    if isinstance(stim_path, Mapping):  # ie. from pkl file
         return dict(stim_path)
     path = npc_io.from_pathlike(stim_path)
     if path.suffix in (".hdf5", ".h5"):
@@ -149,9 +148,7 @@ def get_stim_frame_times(
     # get first frame time in each block
     first_frame_per_block = np.asarray([x[0] for x in frame_times_in_blocks])
 
-    stim_frame_times: dict[
-        StimPathOrDataset, Exception | npt.NDArray[np.float64]
-    ] = {}
+    stim_frame_times: dict[StimPathOrDataset, Exception | npt.NDArray[np.float64]] = {}
 
     exception: Exception | None = None
     # loop through stim files
@@ -255,6 +252,7 @@ def assert_stim_times(result: Exception | npt.NDArray) -> npt.NDArray:
         raise result from None
     return result
 
+
 def get_num_trials(
     stim_path_or_data: npc_io.PathLike | h5py.File,
 ) -> int:
@@ -355,6 +353,7 @@ def get_stim_trigger_frames(
         int(v) if ~np.isnan(v) else None
         for v in safe_index(start_frames, np.arange(len(start_frames)))
     )
+
 
 def safe_index(
     array: npt.ArrayLike, indices: SupportsFloat | Iterable[SupportsFloat]
