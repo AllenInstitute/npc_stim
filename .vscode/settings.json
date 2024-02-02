@@ -3,5 +3,15 @@
     "python.linting.enabled": true,
     "python.linting.pylintEnabled": false,
     "python.analysis.inlayHints.functionReturnTypes": true,
-    "python.analysis.typeCheckingMode": "off"
+    "python.analysis.typeCheckingMode": "off",
+    "workbench.colorCustomizations": {
+        "commandCenter.border": "#15202b99",
+        "panel.border": "#82e3f5",
+        "sash.hoverBorder": "#82e3f5",
+        "titleBar.activeBackground": "#53d8f1",
+        "titleBar.activeForeground": "#15202b",
+        "titleBar.inactiveBackground": "#53d8f199",
+        "titleBar.inactiveForeground": "#15202b99"
+    },
+    "peacock.color": "#53d8f1"
 }
