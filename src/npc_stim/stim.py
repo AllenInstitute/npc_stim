@@ -400,6 +400,7 @@ def safe_index(
         return result.item()
     return result
 
+
 def validate(
     *stim_paths: StimPathOrDataset,
     sync: npc_sync.SyncPathOrDataset,
@@ -408,25 +409,29 @@ def validate(
     Check that the stim files can be opened and have valid data that corresponds
     to the sync file. Raises an AssertionError if any of the stim files fail to
     open or can't be identified on sync.
-    
+
     - validation of other properties (trial starts, display times, etc.) is
       specific to the type of stim and file format
-      
+
     >>> good_stim_1 = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/Spontaneous_670248_20230802_114611.hdf5'
     >>> good_stim_2 = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/SpontaneousRewards_670248_20230802_130736.hdf5'
     >>> sync = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/20230802T113053.h5'
     >>> validate(good_stim_1, good_stim_2, sync=sync)
-    
-    # stim file that doesn't open or has bad data: 
+
+    # stim file that doesn't open or has bad data:
     >>> bad_stim = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5'
     >>> validate(bad_stim, sync=sync)
     Traceback (most recent call last):
     ...
     AssertionError: Failed to validate stim_path = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5'
     """
+
     def validate_single_stim(stim_path, sync=sync) -> None:
-        for v in get_stim_frame_times(stim_path, sync=sync).values(): # should be only one entry
+        for v in get_stim_frame_times(
+            stim_path, sync=sync
+        ).values():  # should be only one entry
             assert_stim_times(v)
+
     logger.info(f"Validating {len(stim_paths)} stim files with sync data")
     for stim_path in stim_paths:
         logger.debug(f"Validating {stim_path = }")
@@ -435,6 +440,7 @@ def validate(
         except Exception as exc:
             raise AssertionError(f"Failed to validate {stim_path = }") from exc
         logger.info(f"Validated {stim_path = }")
+
 
 if __name__ == "__main__":
     from npc_stim import testmod
