@@ -401,7 +401,7 @@ def safe_index(
     return result
 
 
-def validate(
+def validate_stim(
     *stim_paths: StimPathOrDataset,
     sync: npc_sync.SyncPathOrDataset,
 ) -> None:
@@ -416,11 +416,11 @@ def validate(
     >>> good_stim_1 = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/Spontaneous_670248_20230802_114611.hdf5'
     >>> good_stim_2 = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/SpontaneousRewards_670248_20230802_130736.hdf5'
     >>> sync = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/20230802T113053.h5'
-    >>> validate(good_stim_1, good_stim_2, sync=sync)
+    >>> validate_stim(good_stim_1, good_stim_2, sync=sync)
 
     # stim file that doesn't open or has bad data:
     >>> bad_stim = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5'
-    >>> validate(bad_stim, sync=sync)
+    >>> validate_stim(bad_stim, sync=sync)
     Traceback (most recent call last):
     ...
     AssertionError: Failed to validate stim_path = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5'
