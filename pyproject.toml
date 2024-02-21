@@ -11,7 +11,7 @@ dependencies = [
     "npc-session>=0.1.33",
     "scipy>=1.12.0",
 ]
-version = "0.1.4"
+version = "0.1.5"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
