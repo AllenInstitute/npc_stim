@@ -5,7 +5,7 @@ import io
 import logging
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import Literal, SupportsFloat, Union
+from typing import Literal, SupportsFloat
 
 import h5py
 import npc_io
@@ -13,9 +13,8 @@ import npc_session
 import npc_sync
 import numpy as np
 import numpy.typing as npt
-from typing_extensions import TypeAlias
 
-StimPathOrDataset: TypeAlias = Union[npc_io.PathLike, h5py.File, Mapping]
+from npc_stim.types import StimPathOrDataset
 
 logger = logging.getLogger(__name__)
 
