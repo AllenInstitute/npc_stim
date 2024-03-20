@@ -38,7 +38,11 @@ def get_h5_stim_data(stim_path: StimPathOrDataset, **kwargs) -> h5py.File:
     if isinstance(stim_path, Mapping):
         raise ValueError("Susepcted pickle date encountered: use `get_pkl_stim_data`")
     kwargs.setdefault("mode", "r")
-    return h5py.File(io.BytesIO(npc_io.from_pathlike(stim_path).read_bytes()), **kwargs)
+    path = npc_io.from_pathlike(stim_path)
+    if path.protocol in ("", "file"):
+        return h5py.File(io.BytesIO(path.read_bytes()), **kwargs)
+    else:
+        return h5py.File(path.open(mode="rb", cache_type="first"), **kwargs)
 
 
 def get_pkl_stim_data(stim_path: StimPathOrDataset, **kwargs) -> dict:
