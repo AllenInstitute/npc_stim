@@ -111,34 +111,33 @@ def get_running_speed_from_hdf5(
     array([        nan, 26.76305601, 26.33139382, ..., 37.12294866, 38.20210414, 39.49709072])
     """
     d = npc_stim.stim.get_stim_data(stim_path_or_dataset)
-    if (
+    if not (
         "rotaryEncoder" in d
         and isinstance(d["rotaryEncoder"][()], bytes)
         and d["rotaryEncoder"].asstr()[()] == "digital"
     ):
-        if "frameRate" in d:
-            assert d["frameRate"][()] == RUNNING_SAMPLE_RATE
-        wheel_revolutions = (
-            d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
+        raise ValueError(f"No rotary encoder data found (or not the expected format) in {stim_path_or_dataset}")
+    if "frameRate" in d:
+        assert d["frameRate"][()] == RUNNING_SAMPLE_RATE
+    wheel_revolutions = (
+        d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
+    )
+    if not any(wheel_revolutions):
+        logger.warning(f"No wheel revolutions found in {stim_path_or_dataset}")
+    wheel_radius_cm = d["wheelRadius"][()]
+    if RUNNING_SPEED_UNITS == "m/s":
+        running_disk_radius = wheel_radius_cm / 100
+    elif RUNNING_SPEED_UNITS == "cm/s":
+        running_disk_radius = wheel_radius_cm
+    else:
+        raise ValueError(
+            f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}"
         )
-        if not any(wheel_revolutions):
-            return None
-        wheel_radius_cm = d["wheelRadius"][()]
-        if RUNNING_SPEED_UNITS == "m/s":
-            running_disk_radius = wheel_radius_cm / 100
-        elif RUNNING_SPEED_UNITS == "cm/s":
-            running_disk_radius = wheel_radius_cm
-        else:
-            raise ValueError(
-                f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}"
-            )
-        speed = np.diff(
-            wheel_revolutions * 2 * np.pi * running_disk_radius * RUNNING_SAMPLE_RATE
-        )
-        # we lost one sample due to diff: pad with nan to keep same number of samples
-        return np.concatenate([[np.nan], speed])
-    return None
-
+    speed = np.diff(
+        wheel_revolutions * 2 * np.pi * running_disk_radius * RUNNING_SAMPLE_RATE
+    )
+    # we lost one sample due to diff: pad with nan to keep same number of samples
+    return np.concatenate([[np.nan], speed])
 
 def lowpass_filter(running_speed: npt.NDArray) -> npt.NDArray:
     """
