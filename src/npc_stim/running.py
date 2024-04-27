@@ -116,12 +116,12 @@ def get_running_speed_from_hdf5(
         and isinstance(d["rotaryEncoder"][()], bytes)
         and d["rotaryEncoder"].asstr()[()] == "digital"
     ):
-        raise ValueError(f"No rotary encoder data found (or not the expected format) in {stim_path_or_dataset}")
+        raise ValueError(
+            f"No rotary encoder data found (or not the expected format) in {stim_path_or_dataset}"
+        )
     if "frameRate" in d:
         assert d["frameRate"][()] == RUNNING_SAMPLE_RATE
-    wheel_revolutions = (
-        d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
-    )
+    wheel_revolutions = d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
     if not any(wheel_revolutions):
         logger.warning(f"No wheel revolutions found in {stim_path_or_dataset}")
     wheel_radius_cm = d["wheelRadius"][()]
@@ -130,14 +130,13 @@ def get_running_speed_from_hdf5(
     elif RUNNING_SPEED_UNITS == "cm/s":
         running_disk_radius = wheel_radius_cm
     else:
-        raise ValueError(
-            f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}"
-        )
+        raise ValueError(f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}")
     speed = np.diff(
         wheel_revolutions * 2 * np.pi * running_disk_radius * RUNNING_SAMPLE_RATE
     )
     # we lost one sample due to diff: pad with nan to keep same number of samples
     return np.concatenate([[np.nan], speed])
+
 
 def lowpass_filter(running_speed: npt.NDArray) -> npt.NDArray:
     """
