@@ -40,7 +40,7 @@ def get_running_speed_from_stim_files(
     running_speed = np.array([])
     timestamps = np.array([])
 
-    def _append(values, times):
+    def _append(values: npt.NDArray[np.floating], times: npt.NDArray[np.floating]) -> None:
         if len(times) + 1 == len(values):
             values = values[1:]
 
@@ -72,7 +72,7 @@ def get_running_speed_from_stim_files(
         for hdf5 in stim_path_or_dataset:
             read_times = npc_stim.stim.get_input_data_times(hdf5, sync)
             h5_data = get_running_speed_from_hdf5(hdf5)
-            if h5_data is None:
+            if h5_data.size == 0:
                 continue
             _append(h5_data, read_times)
 
@@ -95,7 +95,7 @@ def get_frame_times_from_stim_file(
 
 def get_running_speed_from_hdf5(
     stim_path_or_dataset: StimPathOrDataset,
-) -> npt.NDArray | None:
+) -> npt.NDArray[np.floating]:
     """
     Running speed in m/s or cm/s (see `UNITS`).
 
@@ -124,6 +124,7 @@ def get_running_speed_from_hdf5(
     wheel_revolutions = d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
     if not any(wheel_revolutions):
         logger.warning(f"No wheel revolutions found in {stim_path_or_dataset}")
+        return np.array([])
     wheel_radius_cm = d["wheelRadius"][()]
     if RUNNING_SPEED_UNITS == "m/s":
         running_disk_radius = wheel_radius_cm / 100
