@@ -40,7 +40,9 @@ def get_running_speed_from_stim_files(
     running_speed = np.array([])
     timestamps = np.array([])
 
-    def _append(values: npt.NDArray[np.floating], times: npt.NDArray[np.floating]) -> None:
+    def _append(
+        values: npt.NDArray[np.floating], times: npt.NDArray[np.floating]
+    ) -> None:
         if len(times) + 1 == len(values):
             values = values[1:]
 

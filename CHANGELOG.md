@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
 <!-- insertion marker -->
+## [v0.1.8](https://github.com/alleninstitute/npc_stim/releases/tag/v0.1.8) - 2024-04-28
+
+<small>[Compare with v0.1.7](https://github.com/alleninstitute/npc_stim/compare/v0.1.7...v0.1.8)</small>
+
+### Fixed
+
+- Fix appending running times when data is missing ([95654e1](https://github.com/alleninstitute/npc_stim/commit/95654e13d886ff9e3bd3d77224a72aa07cc5f899) by bjhardcastle).
+
 ## [v0.1.7](https://github.com/alleninstitute/npc_stim/releases/tag/v0.1.7) - 2024-04-27
 
 <small>[Compare with v0.1.6](https://github.com/alleninstitute/npc_stim/compare/v0.1.6...v0.1.7)</small>
