@@ -49,7 +49,7 @@ def get_pkl_stim_data(stim_path: StimPathOrDataset, **kwargs) -> dict:
     if isinstance(stim_path, Mapping):
         return dict(stim_path)
     if isinstance(stim_path, h5py.File):
-        raise ValueError("Susepcted hdf5 date encountered: use `get_h5_stim_data`")
+        raise TypeError("hdf5 data encountered when pkl data expected: use `get_h5_stim_data` instead")
     kwargs.setdefault("encoding", "latin1")
     return pickle.loads(npc_io.from_pathlike(stim_path).read_bytes())
 
