@@ -37,8 +37,8 @@ def get_running_speed_from_stim_files(
             "Must pass sync file to coordinate data from multiple stim files."
         )
 
-    running_speed = np.array([])
-    timestamps = np.array([])
+    _running_speed_blocks = []
+    _timestamps_blocks = []
 
     def _append(
         values: npt.NDArray[np.floating], times: npt.NDArray[np.floating]
@@ -54,12 +54,10 @@ def get_running_speed_from_stim_files(
             raise ValueError(
                 f"Length mismatch between running speed ({len(values)}) and timestamps ({len(times)})"
             )
-        nonlocal running_speed, timestamps
         # we need to filter before pooling discontiguous blocks of samples
-        running_speed = np.concatenate(
-            [running_speed, filt(values) if filt else values]
-        )
-        timestamps = np.concatenate([timestamps, times])
+        values = filt(values) if filt else values
+        _running_speed_blocks.append(values)
+        _timestamps_blocks.append(times)
 
     if sync is None:
         _append(
@@ -77,8 +75,11 @@ def get_running_speed_from_stim_files(
             if h5_data.size == 0:
                 continue
             _append(h5_data, read_times)
-
-    assert len(running_speed) == len(timestamps)
+    assert len(_running_speed_blocks) == len(_timestamps_blocks)
+    sorted_block_indices = np.argsort([block[0] for block in _timestamps_blocks])
+    running_speed = np.concatenate([_running_speed_blocks[i] for i in sorted_block_indices])
+    timestamps = np.concatenate([_timestamps_blocks[i] for i in sorted_block_indices])
+    assert np.all(np.diff(timestamps) > 0)
     return running_speed, timestamps
 
 
