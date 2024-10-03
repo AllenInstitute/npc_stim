@@ -77,7 +77,9 @@ def get_running_speed_from_stim_files(
             _append(h5_data, read_times)
     assert len(_running_speed_blocks) == len(_timestamps_blocks)
     sorted_block_indices = np.argsort([block[0] for block in _timestamps_blocks])
-    running_speed = np.concatenate([_running_speed_blocks[i] for i in sorted_block_indices])
+    running_speed = np.concatenate(
+        [_running_speed_blocks[i] for i in sorted_block_indices]
+    )
     timestamps = np.concatenate([_timestamps_blocks[i] for i in sorted_block_indices])
     assert np.all(np.diff(timestamps) > 0)
     return running_speed, timestamps
