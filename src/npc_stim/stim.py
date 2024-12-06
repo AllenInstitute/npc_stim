@@ -49,7 +49,9 @@ def get_pkl_stim_data(stim_path: StimPathOrDataset, **kwargs) -> dict:
     if isinstance(stim_path, Mapping):
         return dict(stim_path)
     if isinstance(stim_path, h5py.File):
-        raise TypeError("hdf5 data encountered when pkl data expected: use `get_h5_stim_data` instead")
+        raise TypeError(
+            "hdf5 data encountered when pkl data expected: use `get_h5_stim_data` instead"
+        )
     kwargs.setdefault("encoding", "latin1")
     return pickle.loads(npc_io.from_pathlike(stim_path).read_bytes())
 
@@ -267,7 +269,7 @@ def get_num_trials(
     return len(
         stim_data.get("trialEndFrame")
         or stim_data.get("stimStartFrame")
-        or stim_data.get("trialOptoOnsetFrame") # for optoTagging
+        or stim_data.get("trialOptoOnsetFrame")  # for optoTagging
     )
 
 
@@ -335,11 +337,12 @@ def get_stim_trigger_frames(
         # optoTagging experiments use "trialOptoOnsetFrame" instead of
         # "trialStimStartFrame" - should be safe to switch.. the stim_type
         # parameter just wasn't set to 'opto' when the function was called
-        if 'optoFeedbackBlocks' in stim_data or 'feedback' in stim_data['taskVersion'].asstr()[()]:
-            logger.info(
-                'Feedback opto experiment detected'
-            )
-        start_frames = opto # may be adjusted below
+        if (
+            "optoFeedbackBlocks" in stim_data
+            or "feedback" in stim_data["taskVersion"].asstr()[()]
+        ):
+            logger.info("Feedback opto experiment detected")
+        start_frames = opto  # may be adjusted below
         if stim_data.get("optoTaggingLocs") is None:
             logger.warning(
                 'Using "trialOptoOnsetFrame" instead of "trialStimStartFrame" - this is likely an old optoTagging experiment, and `stim_type` was specified as `stim` instead of `opto`.'
