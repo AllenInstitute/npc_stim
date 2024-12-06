@@ -266,8 +266,8 @@ def get_num_trials(
     stim_data = get_h5_stim_data(stim_path_or_data)
     return len(
         stim_data.get("trialEndFrame")
-        or stim_data.get("trialOptoOnsetFrame")
         or stim_data.get("stimStartFrame")
+        or stim_data.get("trialOptoOnsetFrame") # for optoTagging
     )
 
 
@@ -335,7 +335,11 @@ def get_stim_trigger_frames(
         # optoTagging experiments use "trialOptoOnsetFrame" instead of
         # "trialStimStartFrame" - should be safe to switch.. the stim_type
         # parameter just wasn't set to 'opto' when the function was called
-        start_frames = opto
+        if 'optoFeedbackBlocks' in stim_data or 'feedback' in stim_data['taskVersion'].asstr()[()]:
+            logger.info(
+                'Feedback opto experiment detected'
+            )
+        start_frames = opto # may be adjusted below
         if stim_data.get("optoTaggingLocs") is None:
             logger.warning(
                 'Using "trialOptoOnsetFrame" instead of "trialStimStartFrame" - this is likely an old optoTagging experiment, and `stim_type` was specified as `stim` instead of `opto`.'
