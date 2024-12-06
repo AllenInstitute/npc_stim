@@ -60,6 +60,7 @@ def get_running_speed_from_stim_files(
         _timestamps_blocks.append(times)
 
     if sync is None:
+        assert len(stim_path_or_dataset) == 1
         _append(
             get_running_speed_from_hdf5(*stim_path_or_dataset),
             get_frame_times_from_stim_file(*stim_path_or_dataset),
