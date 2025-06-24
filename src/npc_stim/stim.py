@@ -305,7 +305,7 @@ def get_stim_frame_times(
     sorted_keys = sorted(
         stim_frame_times.keys(),
         key=lambda x: (
-            0 if isinstance(stim_frame_times[x], Exception) else stim_frame_times[x][0]   # type: ignore[index]
+            0 if isinstance(stim_frame_times[x], Exception) else stim_frame_times[x][0]  # type: ignore[index]
         ),
     )
     return {k: stim_frame_times[k] for k in sorted_keys}
