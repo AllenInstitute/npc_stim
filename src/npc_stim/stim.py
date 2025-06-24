@@ -110,6 +110,79 @@ def get_vis_display_times(
     )
 
 
+def get_stim_block_to_path(
+    stim_paths: tuple[StimPathOrDataset, ...],
+    sync_data: npc_sync.SyncDataset,
+    n_frames_per_block: npt.NDArray[np.int_],
+    first_frame_per_block: npt.NDArray[np.float64],
+) -> dict[int, StimPathOrDataset | None]:
+    """
+    Map sync block indices to stim file paths based on start time and frame count matching.
+
+    Returns a dict where keys are block indices and values are either stim paths or None
+    if no stim file matches that block.
+    """
+    block_to_stim: dict[int, StimPathOrDataset | None] = dict.fromkeys(
+        range(len(n_frames_per_block))
+    )
+
+    # Track which stim files have been matched to avoid double-assignment
+    matched_stims: set[StimPathOrDataset] = set()
+
+    for stim_path in stim_paths:
+        # Skip if already matched
+        if stim_path in matched_stims:
+            continue
+
+        try:
+            stim_data = get_h5_stim_data(stim_path)
+        except OSError:
+            continue  # Skip files that can't be opened
+
+        n_stim_frames = get_total_stim_frames(stim_data)
+        if n_stim_frames == 0:
+            continue  # Skip files with no frames
+
+        stim_start_time = get_stim_start_time(stim_data)
+        if abs((stim_start_time - sync_data.start_time).days > 0):
+            continue  # Skip files from different days
+
+        stim_start_time_on_sync = (stim_start_time - sync_data.start_time).seconds
+        matching_block_idx_by_start_time = np.argmin(
+            abs(first_frame_per_block - stim_start_time_on_sync)
+        )
+        matching_block_idx_by_len = np.argmin(abs(n_frames_per_block - n_stim_frames))
+
+        start_and_len_match_disagree = (
+            matching_block_idx_by_start_time != matching_block_idx_by_len
+        ) and (
+            len(
+                [
+                    same_len_stims
+                    for same_len_stims in n_frames_per_block
+                    if same_len_stims == n_frames_per_block[matching_block_idx_by_len]
+                ]
+            )
+            == 1
+        )
+
+        num_frames_match = (
+            n_stim_frames == n_frames_per_block[matching_block_idx_by_start_time]
+        )
+
+        if num_frames_match and not start_and_len_match_disagree:
+            block_to_stim[matching_block_idx_by_start_time] = stim_path
+            matched_stims.add(stim_path)
+        elif (
+            start_and_len_match_disagree
+            and n_stim_frames == n_frames_per_block[matching_block_idx_by_len]
+        ):
+            block_to_stim[matching_block_idx_by_len] = stim_path
+            matched_stims.add(stim_path)
+
+    return block_to_stim
+
+
 def get_stim_frame_times(
     *stim_paths: StimPathOrDataset,
     sync: npc_sync.SyncPathOrDataset,
@@ -153,101 +226,88 @@ def get_stim_frame_times(
     # get first frame time in each block
     first_frame_per_block = np.asarray([x[0] for x in frame_times_in_blocks])
 
-    stim_frame_times: dict[StimPathOrDataset, Exception | npt.NDArray[np.float64]] = {}
+    # Get mapping of block indices to stim paths
+    block_to_stim = get_stim_block_to_path(
+        stim_paths, sync_data, n_frames_per_block, first_frame_per_block
+    )
 
-    exception: Exception | None = None
-    # loop through stim files
+    stim_frame_times: dict[StimPathOrDataset, Exception | npt.NDArray] = {}
+
+    # Process each stim file and generate appropriate result (frame times or exception)
     for stim_path in stim_paths:
-        # load each stim file once - may fail if file wasn't saved correctly
         try:
             stim_data = get_h5_stim_data(stim_path)
         except OSError as exc:
-            exception = exc
-            stim_frame_times[stim_path] = exception
+            stim_frame_times[stim_path] = exc
             continue
 
-        # get number of frames
         n_stim_frames = get_total_stim_frames(stim_data)
         if n_stim_frames == 0:
-            exception = ValueError(f"No frames found in {stim_path = }")
-            stim_frame_times[stim_path] = exception
+            stim_frame_times[stim_path] = ValueError(
+                f"No frames found in {stim_path = }"
+            )
             continue
 
-        # get first stimulus frame relative to sync start time
-        stim_start_time: datetime.datetime = get_stim_start_time(stim_data)
+        stim_start_time = get_stim_start_time(stim_data)
         if abs((stim_start_time - sync_data.start_time).days > 0):
             logger.error(
                 f"Skipping {stim_path =}, sync data is from a different day: {stim_start_time = }, {sync_data.start_time = }"
             )
             continue
 
-        # try to match to vsyncs by start time
-        stim_start_time_on_sync = (stim_start_time - sync_data.start_time).seconds
-        matching_block_idx_by_start_time = np.argmin(
-            abs(first_frame_per_block - stim_start_time_on_sync)
-        )
-        matching_block_idx_by_len = np.argmin(abs(n_frames_per_block - n_stim_frames))
-        start_and_len_match_disagree: bool = (
-            (matching_block_idx_by_start_time != matching_block_idx_by_len)
-            and (
-                len(
-                    [
-                        same_len_stims
-                        for same_len_stims in n_frames_per_block
-                        if same_len_stims
-                        == n_frames_per_block[matching_block_idx_by_len]
-                    ]
+        # Find which block this stim file was matched to
+        matched_block_idx = None
+        for block_idx, matched_stim in block_to_stim.items():
+            if matched_stim == stim_path:
+                matched_block_idx = block_idx
+                break
+
+        if matched_block_idx is None:
+            # Generate detailed error message for unmatched stim files
+            stim_start_time_on_sync = (stim_start_time - sync_data.start_time).seconds
+            matching_block_idx_by_start_time = np.argmin(
+                abs(first_frame_per_block - stim_start_time_on_sync)
+            )
+            matching_block_idx_by_len = np.argmin(
+                abs(n_frames_per_block - n_stim_frames)
+            )
+
+            start_and_len_match_disagree = (
+                matching_block_idx_by_start_time != matching_block_idx_by_len
+            )
+            num_frames_match = (
+                n_stim_frames == n_frames_per_block[matching_block_idx_by_start_time]
+            )
+
+            if not num_frames_match and not start_and_len_match_disagree:
+                frame_diff = (
+                    n_stim_frames - n_frames_per_block[matching_block_idx_by_start_time]
                 )
-                == 1
-            )
-            # if multiple blocks have the same number of frames, then we can't
-            # use the number of frames to disambiguate
-        )
-        num_frames_match: bool = (
-            n_stim_frames == n_frames_per_block[matching_block_idx_by_start_time]
-        )
-        # use first frame time for actual matching
-        if not num_frames_match and not start_and_len_match_disagree:
-            frame_diff = (
-                n_stim_frames - n_frames_per_block[matching_block_idx_by_start_time]
-            )
-            exception = IndexError(
-                f"Closest match with {stim_path} has a mismatch of {frame_diff} frames."
-            )
-            stim_frame_times[stim_path] = exception
-            continue
-        elif start_and_len_match_disagree:
-            # if frame len gets the right match, and there's only one stim with that
-            # number of frames (checked earlier), then we take it as the
-            # correct match - however it indicates a problem with time info on
-            # sync or in the stim files that we should log
-            msg = f"failed to match frame times using {stim_start_time = } with {sync_data.start_time = }, expected {stim_start_time_on_sync = }. Sync or stim file may have the wrong start-time info."
-            if n_stim_frames == n_frames_per_block[matching_block_idx_by_len]:
-                logger.warning(
-                    f"{stim_path = } matched to sync block using {n_stim_frames = }, but {msg}"
+                stim_frame_times[stim_path] = IndexError(
+                    f"Closest match with {stim_path} has a mismatch of {frame_diff} frames."
                 )
-                stim_frame_times[stim_path] = frame_times_in_blocks[
-                    matching_block_idx_by_len
-                ]
-                continue
-            # otherwise, we have a mismatch that we can't resolve
-            time_diff_len = (
-                stim_start_time_on_sync
-                - first_frame_per_block[matching_block_idx_by_len]
-            )
-            time_diff_start = (
-                stim_start_time_on_sync
-                - first_frame_per_block[matching_block_idx_by_start_time]
-            )
-            exception = IndexError(
-                f"{matching_block_idx_by_start_time=} != {matching_block_idx_by_len=} for {stim_path}: {msg} Closest match by start time has a mismatch of {time_diff_start:.1f} seconds. Closest match by number of frames has a mismatch of {time_diff_len:.1f} seconds."
-            )
-            stim_frame_times[stim_path] = exception
+            elif start_and_len_match_disagree:
+                time_diff_len = (
+                    stim_start_time_on_sync
+                    - first_frame_per_block[matching_block_idx_by_len]
+                )
+                time_diff_start = (
+                    stim_start_time_on_sync
+                    - first_frame_per_block[matching_block_idx_by_start_time]
+                )
+                stim_frame_times[stim_path] = IndexError(
+                    f"{matching_block_idx_by_start_time=} != {matching_block_idx_by_len=} for {stim_path}: failed to match frame times using start time. Closest match by start time has a mismatch of {time_diff_start:.1f} seconds. Closest match by number of frames has a mismatch of {time_diff_len:.1f} seconds."
+                )
             continue
-        stim_frame_times[stim_path] = frame_times_in_blocks[
-            matching_block_idx_by_start_time
-        ]
-    sorted_keys = sorted(stim_frame_times.keys(), key=lambda x: 0 if isinstance(stim_frame_times[x], Exception) else stim_frame_times[x][0])  # type: ignore[index]
+
+        stim_frame_times[stim_path] = frame_times_in_blocks[matched_block_idx]
+
+    sorted_keys = sorted(
+        stim_frame_times.keys(),
+        key=lambda x: (
+            0 if isinstance(stim_frame_times[x], Exception) else stim_frame_times[x][0]   # type: ignore[index]
+        ),
+    )
     return {k: stim_frame_times[k] for k in sorted_keys}
 
 
