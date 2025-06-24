@@ -171,13 +171,13 @@ def get_stim_block_to_path(
         )
 
         if num_frames_match and not start_and_len_match_disagree:
-            block_to_stim[matching_block_idx_by_start_time] = stim_path
+            block_to_stim[int(matching_block_idx_by_start_time)] = stim_path
             matched_stims.add(stim_path)
         elif (
             start_and_len_match_disagree
             and n_stim_frames == n_frames_per_block[matching_block_idx_by_len]
         ):
-            block_to_stim[matching_block_idx_by_len] = stim_path
+            block_to_stim[int(matching_block_idx_by_len)] = stim_path
             matched_stims.add(stim_path)
 
     return block_to_stim
