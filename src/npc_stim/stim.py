@@ -13,6 +13,7 @@ import npc_session
 import npc_sync
 import numpy as np
 import numpy.typing as npt
+import upath
 
 from npc_stim.types import StimPathOrDataset
 
@@ -111,23 +112,27 @@ def get_vis_display_times(
 
 
 def get_stim_block_to_path(
-    stim_paths: tuple[StimPathOrDataset, ...],
+    stim_paths: Iterable[npc_io.PathLike],
     sync_data: npc_sync.SyncDataset,
-    n_frames_per_block: npt.NDArray[np.int_],
-    first_frame_per_block: npt.NDArray[np.float64],
-) -> dict[int, StimPathOrDataset | None]:
+) -> dict[int, upath.UPath | None]:
     """
     Map sync block indices to stim file paths based on start time and frame count matching.
 
     Returns a dict where keys are block indices and values are either stim paths or None
     if no stim file matches that block.
     """
-    block_to_stim: dict[int, StimPathOrDataset | None] = dict.fromkeys(
-        range(len(n_frames_per_block))
+
+    block_to_stim: dict[int, upath.UPath | None] = dict.fromkeys(
+        range(len(sync_data.vsync_times_in_blocks))
     )
 
+    # get num frames in each block
+    n_frames_per_block = np.asarray([len(x) for x in sync_data.vsync_times_in_blocks])
+    # get first frame time in each block
+    first_frame_per_block = np.asarray([x[0] for x in sync_data.vsync_times_in_blocks])
+
     # Track which stim files have been matched to avoid double-assignment
-    matched_stims: set[StimPathOrDataset] = set()
+    matched_stims: set[npc_io.PathLike] = set()
 
     for stim_path in stim_paths:
         # Skip if already matched
@@ -169,7 +174,7 @@ def get_stim_block_to_path(
         num_frames_match = (
             n_stim_frames == n_frames_per_block[matching_block_idx_by_start_time]
         )
-
+        stim_path = npc_io.from_pathlike(stim_path)
         if num_frames_match and not start_and_len_match_disagree:
             block_to_stim[int(matching_block_idx_by_start_time)] = stim_path
             matched_stims.add(stim_path)
@@ -184,10 +189,10 @@ def get_stim_block_to_path(
 
 
 def get_stim_frame_times(
-    *stim_paths: StimPathOrDataset,
+    *stim_paths: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset,
     frame_time_type: Literal["display_time", "vsync"] = "display_time",
-) -> dict[StimPathOrDataset, Exception | npt.NDArray[np.float64]]:
+) -> dict[upath.UPath, Exception | npt.NDArray[np.float64]]:
     """
     - keys are the stim paths provided as inputs
 
@@ -213,23 +218,16 @@ def get_stim_frame_times(
 
     # load sync file once
     sync_data = npc_sync.get_sync_data(sync)
-    # get vsync_times_in_blocks
-    if "vsync" in frame_time_type:
-        frame_times_in_blocks = sync_data.vsync_times_in_blocks
-    # get frame_display_time_blocks
-    elif "display" in frame_time_type:
-        frame_times_in_blocks = sync_data.frame_display_time_blocks
-    else:
-        raise ValueError(f"Unexpected value: {frame_time_type = }")
-    # get num frames in each block
-    n_frames_per_block = np.asarray([len(x) for x in frame_times_in_blocks])
-    # get first frame time in each block
-    first_frame_per_block = np.asarray([x[0] for x in frame_times_in_blocks])
 
     # Get mapping of block indices to stim paths
     block_to_stim = get_stim_block_to_path(
-        stim_paths, sync_data, n_frames_per_block, first_frame_per_block
+        stim_paths, sync_data
     )
+
+    # get num frames in each block
+    n_frames_per_block = np.asarray([len(x) for x in sync_data.vsync_times_in_blocks])
+    # get first frame time in each block
+    first_frame_per_block = np.asarray([x[0] for x in sync_data.vsync_times_in_blocks])
 
     stim_frame_times: dict[StimPathOrDataset, Exception | npt.NDArray] = {}
 
@@ -263,7 +261,7 @@ def get_stim_frame_times(
                 break
 
         if matched_block_idx is None:
-            # Generate detailed error message for unmatched stim files
+
             stim_start_time_on_sync = (stim_start_time - sync_data.start_time).seconds
             matching_block_idx_by_start_time = np.argmin(
                 abs(first_frame_per_block - stim_start_time_on_sync)
@@ -284,7 +282,7 @@ def get_stim_frame_times(
                     n_stim_frames - n_frames_per_block[matching_block_idx_by_start_time]
                 )
                 stim_frame_times[stim_path] = IndexError(
-                    f"Closest match with {stim_path} has a mismatch of {frame_diff} frames."
+                    f"Closest match with {stim_path!r} has a mismatch of {frame_diff} frames."
                 )
             elif start_and_len_match_disagree:
                 time_diff_len = (
@@ -296,11 +294,11 @@ def get_stim_frame_times(
                     - first_frame_per_block[matching_block_idx_by_start_time]
                 )
                 stim_frame_times[stim_path] = IndexError(
-                    f"{matching_block_idx_by_start_time=} != {matching_block_idx_by_len=} for {stim_path}: failed to match frame times using start time. Closest match by start time has a mismatch of {time_diff_start:.1f} seconds. Closest match by number of frames has a mismatch of {time_diff_len:.1f} seconds."
+                    f"{matching_block_idx_by_start_time=} != {matching_block_idx_by_len=} for {stim_path!r}: failed to match frame times using start time. Closest match by start time has a mismatch of {time_diff_start:.1f} seconds. Closest match by number of frames has a mismatch of {time_diff_len:.1f} seconds."
                 )
             continue
 
-        stim_frame_times[stim_path] = frame_times_in_blocks[matched_block_idx]
+        stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[matched_block_idx]
 
     sorted_keys = sorted(
         stim_frame_times.keys(),
