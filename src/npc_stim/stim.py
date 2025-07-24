@@ -229,10 +229,11 @@ def get_stim_frame_times(
     # get first frame time in each block
     first_frame_per_block = np.asarray([x[0] for x in sync_data.vsync_times_in_blocks])
 
-    stim_frame_times: dict[StimPathOrDataset, Exception | npt.NDArray] = {}
+    stim_frame_times: dict[upath.UPath, Exception | npt.NDArray] = {}
 
     # Process each stim file and generate appropriate result (frame times or exception)
     for stim_path in stim_paths:
+        stim_path = npc_io.from_pathlike(stim_path)
         try:
             stim_data = get_h5_stim_data(stim_path)
         except OSError as exc:
