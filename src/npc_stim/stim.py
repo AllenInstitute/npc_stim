@@ -220,9 +220,7 @@ def get_stim_frame_times(
     sync_data = npc_sync.get_sync_data(sync)
 
     # Get mapping of block indices to stim paths
-    block_to_stim = get_stim_block_to_path(
-        stim_paths, sync_data
-    )
+    block_to_stim = get_stim_block_to_path(stim_paths, sync_data)
 
     # get num frames in each block
     n_frames_per_block = np.asarray([len(x) for x in sync_data.vsync_times_in_blocks])
@@ -299,9 +297,13 @@ def get_stim_frame_times(
                 )
             continue
         if frame_time_type == "display_time":
-            stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[matched_block_idx]
+            stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[
+                matched_block_idx
+            ]
         elif frame_time_type == "vsync":
-            stim_frame_times[stim_path] = sync_data.vsync_times_in_blocks[matched_block_idx]
+            stim_frame_times[stim_path] = sync_data.vsync_times_in_blocks[
+                matched_block_idx
+            ]
         else:
             raise ValueError(
                 f"Unknown frame time type: {frame_time_type}. Expected 'display_time' or 'vsync'."
