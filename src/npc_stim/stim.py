@@ -192,7 +192,7 @@ def get_stim_frame_times(
     *stim_paths: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset,
     frame_time_type: Literal["display_time", "vsync"] = "display_time",
-) -> dict[upath.UPath, Exception | npt.NDArray[np.float64]]:
+) -> dict[npc_io.PathLike, Exception | npt.NDArray[np.float64]]:
     """
     - keys are the stim paths provided as inputs
 
@@ -204,7 +204,7 @@ def get_stim_frame_times(
     Returns the frame times for each stim file based on start time and number
     of frames - can be provided in any order:
     >>> frame_times = get_stim_frame_times(good_stim_2, good_stim_1, sync=sync)
-    >>> len(frame_times[good_stim_1])
+    >>> len(frame_times[good_stim_2])
     36000
 
     Returns Exception if the stim file can't be opened, or it has no frames.
@@ -229,11 +229,11 @@ def get_stim_frame_times(
     # get first frame time in each block
     first_frame_per_block = np.asarray([x[0] for x in sync_data.vsync_times_in_blocks])
 
-    stim_frame_times: dict[upath.UPath, Exception | npt.NDArray] = {}
+    stim_frame_times: dict[npc_io.PathLike, Exception | npt.NDArray] = {}
 
     # Process each stim file and generate appropriate result (frame times or exception)
     for stim_path in stim_paths:
-        stim_path = npc_io.from_pathlike(stim_path)
+
         try:
             stim_data = get_h5_stim_data(stim_path)
         except OSError as exc:
@@ -257,7 +257,7 @@ def get_stim_frame_times(
         # Find which block this stim file was matched to
         matched_block_idx = None
         for block_idx, matched_stim in block_to_stim.items():
-            if matched_stim == stim_path:
+            if matched_stim == npc_io.from_pathlike(stim_path):
                 matched_block_idx = block_idx
                 break
 
@@ -298,9 +298,15 @@ def get_stim_frame_times(
                     f"{matching_block_idx_by_start_time=} != {matching_block_idx_by_len=} for {stim_path!r}: failed to match frame times using start time. Closest match by start time has a mismatch of {time_diff_start:.1f} seconds. Closest match by number of frames has a mismatch of {time_diff_len:.1f} seconds."
                 )
             continue
-
-        stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[matched_block_idx]
-
+        if frame_time_type == "display_time":
+            stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[matched_block_idx]
+        elif frame_time_type == "vsync":
+            stim_frame_times[stim_path] = sync_data.vsync_times_in_blocks[matched_block_idx]
+        else:
+            raise ValueError(
+                f"Unknown frame time type: {frame_time_type}. Expected 'display_time' or 'vsync'."
+            )
+    # Sort keys by first frame time, or by exception if present
     sorted_keys = sorted(
         stim_frame_times.keys(),
         key=lambda x: (
