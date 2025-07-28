@@ -58,7 +58,7 @@ def get_pkl_stim_data(stim_path: StimPathOrDataset, **kwargs) -> dict:
 
 
 def get_input_data_times(
-    stim: StimPathOrDataset,
+    stim: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset | None = None,
 ) -> npt.NDArray[np.float64]:
     """Best-estimate time of `getInputData()` in psychopy event loop, in seconds, from start
@@ -98,7 +98,7 @@ def get_flip_times(
 
 
 def get_vis_display_times(
-    stim: StimPathOrDataset,
+    stim: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset | None = None,
 ) -> npt.NDArray[np.float64]:
     """Best-estimate time of monitor update. Uses photodiode if sync provided. Without sync, this equals frame times."""
@@ -479,7 +479,7 @@ def safe_index(
 
 
 def validate_stim(
-    *stim_paths: StimPathOrDataset,
+    *stim_paths: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset,
 ) -> None:
     """

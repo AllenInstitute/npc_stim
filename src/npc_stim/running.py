@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Literal
 
+import npc_io
 import npc_sync
 import numpy as np
 import numpy.typing as npt
@@ -26,13 +27,13 @@ in `acquisition`"""
 
 
 def get_running_speed_from_stim_files(
-    *stim_path_or_dataset: StimPathOrDataset,
+    *stim_path: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset | None = None,
     filt: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]] | None = None,
 ) -> tuple[npt.NDArray, npt.NDArray]:
     """Pools running speeds across files. Returns arrays of running speed and
     corresponding timestamps."""
-    if not sync and len(stim_path_or_dataset) > 1:
+    if not sync and len(stim_path) > 1:
         raise ValueError(
             "Must pass sync file to coordinate data from multiple stim files."
         )
@@ -60,17 +61,17 @@ def get_running_speed_from_stim_files(
         _timestamps_blocks.append(times)
 
     if sync is None:
-        assert len(stim_path_or_dataset) == 1
+        assert len(stim_path) == 1
         _append(
-            get_running_speed_from_hdf5(*stim_path_or_dataset),
-            get_frame_times_from_stim_file(*stim_path_or_dataset),
+            get_running_speed_from_hdf5(*stim_path),
+            get_frame_times_from_stim_file(*stim_path),
         )
     else:
         # we need timestamps for each frame's nidaq-read time (wheel encoder is read before frame's
         # flip time)
         # there may be multiple h5 files with encoder
         # data per sync file: vsyncs are in blocks with a separating gap
-        for hdf5 in stim_path_or_dataset:
+        for hdf5 in stim_path:
             read_times = npc_stim.stim.get_input_data_times(hdf5, sync)
             h5_data = get_running_speed_from_hdf5(hdf5)
             if h5_data.size == 0:
@@ -87,20 +88,20 @@ def get_running_speed_from_stim_files(
 
 
 def get_frame_times_from_stim_file(
-    stim_path_or_dataset: StimPathOrDataset,
+    stim_path: npc_io.PathLike,
 ) -> npt.NDArray:
     return np.concatenate(
         (
             [0],
             np.cumsum(
-                npc_stim.stim.get_stim_data(stim_path_or_dataset)["frameIntervals"][:]
+                npc_stim.stim.get_stim_data(stim_path)["frameIntervals"][:]
             ),
         )
     )
 
 
 def get_running_speed_from_hdf5(
-    stim_path_or_dataset: StimPathOrDataset,
+    stim_path: npc_io.PathLike,
 ) -> npt.NDArray[np.floating]:
     """
     Running speed in m/s or cm/s (see `UNITS`).
@@ -116,20 +117,20 @@ def get_running_speed_from_hdf5(
     >>> get_running_speed_from_hdf5('s3://aind-ephys-data/ecephys_668755_2023-08-31_12-33-31/behavior/DynamicRouting1_668755_20230831_131418.hdf5')
     array([        nan, 26.76305601, 26.33139382, ..., 37.12294866, 38.20210414, 39.49709072])
     """
-    d = npc_stim.stim.get_stim_data(stim_path_or_dataset)
+    d = npc_stim.stim.get_stim_data(stim_path)
     if not (
         "rotaryEncoder" in d
         and isinstance(d["rotaryEncoder"][()], bytes)
         and d["rotaryEncoder"].asstr()[()] == "digital"
     ):
         raise ValueError(
-            f"No rotary encoder data found (or not the expected format) in {stim_path_or_dataset}"
+            f"No rotary encoder data found (or not the expected format) in {stim_path}"
         )
     if "frameRate" in d:
         assert d["frameRate"][()] == RUNNING_SAMPLE_RATE
     wheel_revolutions = d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
     if not any(wheel_revolutions):
-        logger.warning(f"No wheel revolutions found in {stim_path_or_dataset}")
+        logger.warning(f"No wheel revolutions found in {stim_path}")
         return np.array([])
     wheel_radius_cm = d["wheelRadius"][()]
     if RUNNING_SPEED_UNITS == "m/s":
