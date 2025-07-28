@@ -10,7 +10,6 @@ import numpy.typing as npt
 import scipy.signal
 
 import npc_stim.stim
-from npc_stim.types import StimPathOrDataset
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +92,7 @@ def get_frame_times_from_stim_file(
     return np.concatenate(
         (
             [0],
-            np.cumsum(
-                npc_stim.stim.get_stim_data(stim_path)["frameIntervals"][:]
-            ),
+            np.cumsum(npc_stim.stim.get_stim_data(stim_path)["frameIntervals"][:]),
         )
     )
 
