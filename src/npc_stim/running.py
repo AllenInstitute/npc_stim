@@ -117,6 +117,7 @@ def get_running_speed_from_hdf5(
     >>> get_running_speed_from_hdf5('s3://aind-ephys-data/ecephys_668755_2023-08-31_12-33-31/behavior/DynamicRouting1_668755_20230831_131418.hdf5')
     array([        nan, 26.76305601, 26.33139382, ..., 37.12294866, 38.20210414, 39.49709072])
     """
+    stim_path = npc_io.from_pathlike(stim_path)
     d = npc_stim.stim.get_stim_data(stim_path)
     if not (
         "rotaryEncoder" in d

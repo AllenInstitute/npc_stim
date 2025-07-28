@@ -63,10 +63,10 @@ def get_input_data_times(
 ) -> npt.NDArray[np.float64]:
     """Best-estimate time of `getInputData()` in psychopy event loop, in seconds, from start
     of experiment. Uses preceding frame's vsync time if sync provided"""
-    stim = get_stim_data(stim)
-    assert isinstance(stim, h5py.File), "Only hdf5 stim files supported for now"
+    stim_data = get_stim_data(stim)
+    assert isinstance(stim_data, h5py.File), "Only hdf5 stim files supported for now"
     if not sync:
-        return np.concatenate(([0], np.cumsum(stim["frameIntervals"][:])))
+        return np.concatenate(([0], np.cumsum(stim_data["frameIntervals"][:])))
     return np.concatenate(
         [
             [np.nan],
@@ -102,10 +102,10 @@ def get_vis_display_times(
     sync: npc_sync.SyncPathOrDataset | None = None,
 ) -> npt.NDArray[np.float64]:
     """Best-estimate time of monitor update. Uses photodiode if sync provided. Without sync, this equals frame times."""
-    stim = get_stim_data(stim)
-    assert isinstance(stim, h5py.File), "Only hdf5 stim files supported for now "
+    stim_data = get_stim_data(stim)
+    assert isinstance(stim_data, h5py.File), "Only hdf5 stim files supported for now "
     if not sync:
-        return get_flip_times(stim)
+        return get_flip_times(stim_data)
     return assert_stim_times(
         get_stim_frame_times(stim, sync=sync, frame_time_type="display_time")[stim]
     )
