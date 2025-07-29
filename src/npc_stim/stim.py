@@ -78,17 +78,17 @@ def get_input_data_times(
 
 
 def get_flip_times(
-    stim: StimPathOrDataset,
+    stim: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset | None = None,
 ) -> npt.NDArray[np.float64]:
     """Best-estimate time of `flip()` at end of psychopy event loop, in seconds, from start
     of experiment. Uses frame's vsync time sync provided."""
-    stim = get_stim_data(stim)
-    assert isinstance(stim, h5py.File), "Only hdf5 stim files supported for now"
+    stim_data = get_stim_data(stim)
+    assert isinstance(stim_data, h5py.File), "Only hdf5 stim files supported for now"
     if not sync:
         return np.concatenate(
             (
-                (c := np.cumsum(f := stim["frameIntervals"][:])),
+                (c := np.cumsum(f := stim_data["frameIntervals"][:])),
                 [c[-1] + np.median(np.diff(f))],
             )
         )
