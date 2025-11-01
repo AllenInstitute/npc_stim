@@ -177,12 +177,17 @@ def get_stim_block_to_path(
         stim_path = npc_io.from_pathlike(stim_path)
         if (
             num_frames_match
-            or (np.isclose(n_stim_frames, n_frames_per_block[matching_block_idx_by_len], atol=1))
+            or (
+                np.isclose(
+                    n_stim_frames, n_frames_per_block[matching_block_idx_by_len], atol=1
+                )
+            )
         ) and not start_and_len_match_disagree:
             block_to_stim[int(matching_block_idx_by_start_time)] = stim_path
             matched_stims.add(stim_path)
         elif (
-            start_and_len_match_disagree and num_frames_match  # prefer length match if start time match disagrees
+            start_and_len_match_disagree
+            and num_frames_match  # prefer length match if start time match disagrees
         ):
             block_to_stim[int(matching_block_idx_by_len)] = stim_path
             matched_stims.add(stim_path)
