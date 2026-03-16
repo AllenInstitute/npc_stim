@@ -1568,7 +1568,7 @@ dependencies = [
 requires-dist = [
     { name = "npc-io", specifier = ">=0.1.26" },
     { name = "npc-session", specifier = ">=0.1.33" },
-    { name = "npc-sync", specifier = ">=0.1.19" },
+    { name = "npc-sync", specifier = ">=0.2.2" },
     { name = "scipy", specifier = ">=1.12.0" },
 ]
 
