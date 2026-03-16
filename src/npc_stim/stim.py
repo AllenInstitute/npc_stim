@@ -224,7 +224,7 @@ def get_stim_frame_times(
     """
 
     # load sync file once
-    sync_data = npc_sync.get_sync_data(sync)
+    sync_data = npc_sync.SyncDataset(sync, stim_paths=tuple(stim_paths))
 
     # Get mapping of block indices to stim paths
     block_to_stim = get_stim_block_to_path(stim_paths, sync_data)
