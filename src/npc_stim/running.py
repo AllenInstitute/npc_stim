@@ -45,6 +45,8 @@ def get_running_speed_from_stim_files(
     ) -> None:
         if len(times) + 1 == len(values):
             values = values[1:]
+        elif len(values) + 1 == len(times):
+            times = times[:-1]
 
         if len(times) == len(values):
             times = times[1:]
@@ -71,12 +73,18 @@ def get_running_speed_from_stim_files(
         # there may be multiple h5 files with encoder
         # data per sync file: vsyncs are in blocks with a separating gap
         for hdf5 in stim_path:
-            read_times = npc_stim.stim.get_input_data_times(hdf5, sync)
+            try:
+                read_times = npc_stim.stim.get_input_data_times(hdf5, sync)
+            except (ValueError, IndexError) as exc:
+                logger.warning(f"Skipping {hdf5}: {exc!r}")
+                continue
             h5_data = get_running_speed_from_hdf5(hdf5)
             if h5_data.size == 0:
                 continue
             _append(h5_data, read_times)
     assert len(_running_speed_blocks) == len(_timestamps_blocks)
+    if not _running_speed_blocks:
+        return np.array([]), np.array([])
     sorted_block_indices = np.argsort([block[0] for block in _timestamps_blocks])
     running_speed = np.concatenate(
         [_running_speed_blocks[i] for i in sorted_block_indices]
