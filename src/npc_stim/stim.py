@@ -287,9 +287,16 @@ def get_stim_frame_times(
                 frame_diff = (
                     n_stim_frames - n_frames_per_block[matching_block_idx_by_start_time]
                 )
-                stim_frame_times[stim_path] = IndexError(
-                    f"Closest match with {stim_path!r} has a mismatch of {frame_diff} frames."
-                )
+                if abs(frame_diff) <= 60:
+                    # small mismatch: use best-matching block, truncated to stim frame count
+                    logger.warning(
+                        f"Small frame mismatch ({frame_diff}) for {stim_path!r}: using block {matching_block_idx_by_start_time} truncated to {n_stim_frames} frames"
+                    )
+                    matched_block_idx = matching_block_idx_by_start_time
+                else:
+                    stim_frame_times[stim_path] = IndexError(
+                        f"Closest match with {stim_path!r} has a mismatch of {frame_diff} frames."
+                    )
             elif start_and_len_match_disagree:
                 time_diff_len = (
                     stim_start_time_on_sync
