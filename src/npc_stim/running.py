@@ -72,6 +72,7 @@ def get_running_speed_from_stim_files(
         # flip time)
         # there may be multiple h5 files with encoder
         # data per sync file: vsyncs are in blocks with a separating gap
+        stim_path = sorted(set(stim_path)) # type: ignore[invalid-assignment]
         for hdf5 in stim_path:
             try:
                 read_times = npc_stim.stim.get_input_data_times(hdf5, sync)
