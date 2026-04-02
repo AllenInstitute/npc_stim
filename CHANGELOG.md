@@ -8,9 +8,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 <!-- insertion marker -->
 ## Unreleased
 
-<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.16...HEAD)</small>
+<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.17...HEAD)</small>
+
+### Fixed
+
+- Fix duplicate stim path bug ([2cafb12](https://github.com/AllenInstitute/npc_stim/commit/2cafb12c712ac5c1d14a0d79c2a9380d88f17891) by bjhardcastle).
 
 <!-- insertion marker -->
+## [v0.1.17](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.17) - 2026-03-27
+
+<small>[Compare with v0.1.16](https://github.com/AllenInstitute/npc_stim/compare/v0.1.16...v0.1.17)</small>
+
 ## [v0.1.16](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.16) - 2026-03-16
 
 <small>[Compare with v0.1.15](https://github.com/AllenInstitute/npc_stim/compare/v0.1.15...v0.1.16)</small>
