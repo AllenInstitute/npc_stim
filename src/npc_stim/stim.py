@@ -197,7 +197,7 @@ def get_stim_block_to_path(
 
 def get_stim_frame_times(
     *stim_paths: npc_io.PathLike,
-    sync: npc_io.PathLik,
+    sync: npc_sync.SyncPathOrDataset,
     frame_time_type: Literal["display_time", "vsync"] = "display_time",
 ) -> dict[npc_io.PathLike, Exception | npt.NDArray[np.float64]]:
     """
