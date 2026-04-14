@@ -8,13 +8,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 <!-- insertion marker -->
 ## Unreleased
 
-<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.18...HEAD)</small>
+<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.19...HEAD)</small>
+
+<!-- insertion marker -->
+## [v0.1.19](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.19) - 2026-04-14
+
+<small>[Compare with v0.1.18](https://github.com/AllenInstitute/npc_stim/compare/v0.1.18...v0.1.19)</small>
 
 ### Fixed
 
 - Fix sync path ([647ae96](https://github.com/AllenInstitute/npc_stim/commit/647ae96971ec2176ccaf9dd5b4a31820a28f9d43) by bjhardcastle).
 
-<!-- insertion marker -->
 ## [v0.1.18](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.18) - 2026-04-02
 
 <small>[Compare with v0.1.17](https://github.com/AllenInstitute/npc_stim/compare/v0.1.17...v0.1.18)</small>
