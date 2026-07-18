@@ -8,13 +8,29 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 <!-- insertion marker -->
 ## Unreleased
 
-<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.17...HEAD)</small>
+<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.20...HEAD)</small>
+
+<!-- insertion marker -->
+## [v0.1.20](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.20) - 2026-04-14
+
+<small>[Compare with v0.1.19](https://github.com/AllenInstitute/npc_stim/compare/v0.1.19...v0.1.20)</small>
+
+## [v0.1.19](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.19) - 2026-04-14
+
+<small>[Compare with v0.1.18](https://github.com/AllenInstitute/npc_stim/compare/v0.1.18...v0.1.19)</small>
+
+### Fixed
+
+- Fix sync path ([647ae96](https://github.com/AllenInstitute/npc_stim/commit/647ae96971ec2176ccaf9dd5b4a31820a28f9d43) by bjhardcastle).
+
+## [v0.1.18](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.18) - 2026-04-02
+
+<small>[Compare with v0.1.17](https://github.com/AllenInstitute/npc_stim/compare/v0.1.17...v0.1.18)</small>
 
 ### Fixed
 
 - Fix duplicate stim path bug ([2cafb12](https://github.com/AllenInstitute/npc_stim/commit/2cafb12c712ac5c1d14a0d79c2a9380d88f17891) by bjhardcastle).
 
-<!-- insertion marker -->
 ## [v0.1.17](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.17) - 2026-03-27
 
 <small>[Compare with v0.1.16](https://github.com/AllenInstitute/npc_stim/compare/v0.1.16...v0.1.17)</small>
