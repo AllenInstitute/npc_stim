@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import io
 import logging
+import os
 import pickle
 from collections.abc import Iterable, Mapping
 from typing import Literal, SupportsFloat
@@ -236,6 +237,8 @@ def get_stim_frame_times(
 
     stim_frame_times: dict[npc_io.PathLike, Exception | npt.NDArray] = {}
 
+    if len(stim_paths) == 1:
+        os.environ["SYNC_ALLOW_MISSING_STIM_FILES"] = "1" # getting sync frame times now asserts all stim files are present (since end of 2025)
     # Process each stim file and generate appropriate result (frame times or exception)
     for stim_path in stim_paths:
 
