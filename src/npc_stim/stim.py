@@ -395,6 +395,69 @@ def get_stim_duration(stim_path_or_data: npc_io.PathLike | h5py.File) -> float:
     return np.sum(stim_data["frameIntervals"][:])
 
 
+def _normalize_opto_trigger_frames(
+    stim_data: h5py.File,
+    raw_frames: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+    """Convert DynamicRouting opto onset frames to absolute frame indices.
+
+    Depending on the task-control version, ``trialOptoOnsetFrame`` may contain
+    either an offset from ``trialStimStartFrame`` or an absolute frame index.
+    The encoding can even be mixed within one file. Trial boundaries let us
+    distinguish the two cases without assuming opto starts after the visual
+    stimulus: an absolute opto onset may legitimately precede
+    ``trialStimStartFrame``.
+    """
+    raw = np.asarray(raw_frames, dtype=float).reshape(-1)
+    n_trials = min(get_num_trials(stim_data), len(raw))
+    raw = raw[:n_trials]
+
+    stim_start_dataset = stim_data.get("trialStimStartFrame")
+    trial_start_dataset = stim_data.get("trialStartFrame")
+    trial_end_dataset = stim_data.get("trialEndFrame")
+    if (
+        stim_start_dataset is None
+        or trial_start_dataset is None
+        or trial_end_dataset is None
+    ):
+        return raw
+
+    stim_start = np.asarray(stim_start_dataset[:n_trials], dtype=float).reshape(-1)
+    trial_start = np.asarray(trial_start_dataset[:n_trials], dtype=float).reshape(-1)
+    trial_end = np.asarray(trial_end_dataset[:n_trials], dtype=float).reshape(-1)
+    absolute = raw
+    relative = stim_start + raw
+    finite = np.isfinite(raw)
+    absolute_valid = finite & (absolute >= trial_start) & (absolute <= trial_end)
+    relative_valid = finite & (relative >= trial_start) & (relative <= trial_end)
+    absolute_only = absolute_valid & ~relative_valid
+    relative_only = relative_valid & ~absolute_valid
+    ambiguous = finite & ~(absolute_only | relative_only)
+
+    if absolute_only.any() and relative_only.any():
+        logger.warning(
+            "Mixed absolute and relative opto onset frame encoding detected; "
+            "normalizing each trial using its trial boundaries."
+        )
+
+    # If both candidates are valid, use the dominant unambiguous encoding. In
+    # a file with no unambiguous values, retain the historical monotonicity
+    # fallback for absolute OptoTagging frames versus relative task frames.
+    if absolute_only.any() or relative_only.any():
+        use_relative = relative_only | (
+            ambiguous & (relative_only.sum() >= absolute_only.sum())
+        )
+        normalized = np.where(use_relative, relative, absolute)
+    else:
+        without_nans = raw[finite]
+        if len(without_nans) > 1 and np.all(np.diff(without_nans) > 0):
+            normalized = absolute
+        else:
+            normalized = relative
+
+    return normalized
+
+
 def get_stim_trigger_frames(
     stim_path_or_data: npc_io.PathLike | h5py.File,
     stim_type: str | Literal["opto"] = "stim",
@@ -413,10 +476,12 @@ def get_stim_trigger_frames(
     0
     """
     stim_data = get_h5_stim_data(stim_path_or_data)
+    opto = stim_data.get("trialOptoOnsetFrame")
+    normalize_opto_frames = stim_type == "opto"
     start_frames = (
         (stim_data.get("trialStimStartFrame") or stim_data.get("stimStartFrame"))
-        if stim_type != "opto"
-        else (opto := stim_data.get("trialOptoOnsetFrame"))
+        if not normalize_opto_frames
+        else opto
     )
 
     if start_frames is None and opto is not None:
@@ -429,21 +494,27 @@ def get_stim_trigger_frames(
         ):
             logger.info("Feedback opto experiment detected")
         start_frames = opto  # may be adjusted below
+        normalize_opto_frames = True
         if stim_data.get("optoTaggingLocs") is None:
             logger.warning(
                 'Using "trialOptoOnsetFrame" instead of "trialStimStartFrame" - this is likely an old optoTagging experiment, and `stim_type` was specified as `stim` instead of `opto`.'
             )
 
     start_frames = start_frames[: get_num_trials(stim_data)].squeeze()
-    monotonic_increase = np.all(
-        (without_nans := start_frames[~np.isnan(start_frames)])[1:] > without_nans[:-1]
-    )
-    if not monotonic_increase:
-        # behavior files with opto report the onset frame of opto relative to stim onset for
-        # each trial. OptoTagging files specify absolute frame index
-        start_frames += stim_data.get("trialStimStartFrame")[
-            : get_num_trials(stim_data)
-        ].squeeze()
+    if normalize_opto_frames:
+        start_frames = _normalize_opto_trigger_frames(stim_data, start_frames)
+    else:
+        monotonic_increase = np.all(
+            (without_nans := start_frames[~np.isnan(start_frames)])[1:]
+            > without_nans[:-1]
+        )
+        if not monotonic_increase:
+            # Behavior files with opto report the onset frame of opto relative
+            # to stim onset for each trial. OptoTagging files specify absolute
+            # frame indices.
+            start_frames += stim_data.get("trialStimStartFrame")[
+                : get_num_trials(stim_data)
+            ].squeeze()
 
     return tuple(
         int(v) if ~np.isnan(v) else None
