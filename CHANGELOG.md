@@ -8,13 +8,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 <!-- insertion marker -->
 ## Unreleased
 
-<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.21...HEAD)</small>
+<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.22...HEAD)</small>
+
+<!-- insertion marker -->
+## [v0.1.22](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.22) - 2026-07-18
+
+<small>[Compare with v0.1.21](https://github.com/AllenInstitute/npc_stim/compare/v0.1.21...v0.1.22)</small>
 
 ### Fixed
 
 - Fix getting frame times for single stim ([9e6e1ef](https://github.com/AllenInstitute/npc_stim/commit/9e6e1efa55617993ba67f2caf5d165b9e616a1a0) by bjhardcastle).
 
-<!-- insertion marker -->
 ## [v0.1.21](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.21) - 2026-06-12
 
 <small>[Compare with v0.1.20](https://github.com/AllenInstitute/npc_stim/compare/v0.1.20...v0.1.21)</small>

@@ -2450,7 +2450,7 @@ wheels = [
 
 [[package]]
 name = "npc-stim"
-version = "0.1.22"
+version = "0.1.23"
 source = { editable = "." }
 dependencies = [
     { name = "npc-io" },
