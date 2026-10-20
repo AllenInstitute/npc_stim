@@ -51,7 +51,7 @@ def get_running_speed_from_stim_files(
         if len(times) == len(values):
             times = times[1:]
             values = values[1:]
-            times = times + 0.5 * np.median(np.diff(times))
+            times = times - 0.5 * np.median(np.diff(times))
         else:
             raise ValueError(
                 f"Length mismatch between running speed ({len(values)}) and timestamps ({len(times)})"
@@ -114,8 +114,8 @@ def get_running_speed_from_hdf5(
 
 
     To align with timestamps, remove timestamp[0] and sample[0] and shift
-    timestamps by half a frame (speed is estimated from difference between
-    timestamps)
+    timestamps back by half a frame (speed is estimated from difference
+    between timestamps)
 
     See
     https://github.com/samgale/DynamicRoutingTask/blob/main/Analysis/DynamicRoutingAnalysisUtils.py
