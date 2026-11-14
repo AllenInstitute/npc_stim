@@ -6,7 +6,7 @@ import logging
 import os
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import Literal, SupportsFloat
+from typing import TYPE_CHECKING, Literal, SupportsFloat
 
 import h5py
 import npc_io
@@ -17,6 +17,9 @@ import numpy.typing as npt
 import upath
 
 from npc_stim.types import StimPathOrDataset
+
+if TYPE_CHECKING:
+    import npc_stim.display_times
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +199,38 @@ def get_stim_block_to_path(
     return block_to_stim
 
 
+def get_stim_display_times(
+    *stim_paths: npc_io.PathLike,
+    sync: npc_sync.SyncPathOrDataset,
+    fallback: Literal["constant_lag"] | None = None,
+    raise_on_error: bool = False,
+) -> dict[npc_io.PathLike, Exception | npc_stim.display_times.BlockDisplayTimes]:
+    """As `get_stim_frame_times(..., frame_time_type='display_time')`, but values are
+    `BlockDisplayTimes` (display times with their source and the matched sync block)
+    instead of arrays. Stims without display times get a `ValueError`, as there."""
+    return _get_stim_frame_times(
+        *stim_paths,
+        sync=sync,
+        frame_time_type="display_time",
+        fallback=fallback,
+        raise_on_error=raise_on_error,
+        return_blocks=True,
+    )
+
+
 def get_stim_frame_times(
     *stim_paths: npc_io.PathLike,
     sync: npc_sync.SyncPathOrDataset,
     frame_time_type: Literal["display_time", "vsync"] = "display_time",
+    fallback: Literal["constant_lag"] | None = None,
+    raise_on_error: bool = False,
 ) -> dict[npc_io.PathLike, Exception | npt.NDArray[np.float64]]:
     """
     - keys are the stim paths provided as inputs
+    - for `frame_time_type='display_time'`, see `npc_stim.get_display_times` for
+      `fallback` and `raise_on_error` (the deprecated env vars `SYNC_FALLBACK_CONSTANT_LAG`
+      and `SYNC_DEBUG` are still honored if the arguments aren't given). A stim whose block
+      has no display times gets a `ValueError`.
 
     >>> bad_stim = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5'
     >>> good_stim_1 = 's3://aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/Spontaneous_670248_20230802_114611.hdf5'
@@ -223,9 +251,34 @@ def get_stim_frame_times(
     ...
     FileNotFoundError: aind-ephys-data/ecephys_670248_2023-08-02_11-30-53/behavior/DynamicRouting1_670248_20230802_120703.hdf5
     """
+    return _get_stim_frame_times(
+        *stim_paths,
+        sync=sync,
+        frame_time_type=frame_time_type,
+        fallback=fallback,
+        raise_on_error=raise_on_error,
+    )
+
+
+def _get_stim_frame_times(
+    *stim_paths: npc_io.PathLike,
+    sync: npc_sync.SyncPathOrDataset,
+    frame_time_type: Literal["display_time", "vsync"] = "display_time",
+    fallback: Literal["constant_lag"] | None = None,
+    raise_on_error: bool = False,
+    return_blocks: bool = False,
+) -> dict:
+    import npc_stim.display_times
+
+    if fallback is None and os.getenv("SYNC_FALLBACK_CONSTANT_LAG"):
+        logger.warning(
+            "SYNC_FALLBACK_CONSTANT_LAG env var is deprecated: pass fallback='constant_lag'"
+        )
+        fallback = "constant_lag"
+    raise_on_error = raise_on_error or bool(os.getenv("SYNC_DEBUG"))
 
     # load sync file once
-    sync_data = npc_sync.SyncDataset(sync, stim_paths=tuple(stim_paths))
+    sync_data = npc_sync.get_sync_data(sync)
 
     # Get mapping of block indices to stim paths
     block_to_stim = get_stim_block_to_path(stim_paths, sync_data)
@@ -236,11 +289,11 @@ def get_stim_frame_times(
     first_frame_per_block = np.asarray([x[0] for x in sync_data.vsync_times_in_blocks])
 
     stim_frame_times: dict[npc_io.PathLike, Exception | npt.NDArray] = {}
+    stim_blocks: dict[npc_io.PathLike, npc_stim.display_times.BlockDisplayTimes] = {}
 
-    if len(stim_paths) == 1:
-        os.environ["SYNC_ALLOW_MISSING_STIM_FILES"] = (
-            "1"  # getting sync frame times now asserts all stim files are present (since end of 2025)
-        )
+    display_time_blocks: tuple[npc_stim.display_times.BlockDisplayTimes, ...] | None = (
+        None  # computed on first use
+    )
     # Process each stim file and generate appropriate result (frame times or exception)
     for stim_path in stim_paths:
 
@@ -316,9 +369,22 @@ def get_stim_frame_times(
                 )
             continue
         if frame_time_type == "display_time":
-            stim_frame_times[stim_path] = sync_data.frame_display_time_blocks[
-                matched_block_idx
-            ]
+            if display_time_blocks is None:
+                display_time_blocks = npc_stim.display_times.get_display_times(
+                    sync_data,
+                    block_to_stim,
+                    fallback=fallback,
+                    raise_on_error=raise_on_error,
+                )
+            block = display_time_blocks[matched_block_idx]
+            if block.display_times is None:
+                stim_frame_times[stim_path] = ValueError(
+                    f"No frame display times for {stim_path!r} (sync block {matched_block_idx}): {block.reason}"
+                )
+            else:
+                stim_frame_times[stim_path] = block.display_times
+                if return_blocks:
+                    stim_blocks[stim_path] = block
         elif frame_time_type == "vsync":
             stim_frame_times[stim_path] = sync_data.vsync_times_in_blocks[
                 matched_block_idx
@@ -334,6 +400,8 @@ def get_stim_frame_times(
             0 if isinstance(stim_frame_times[x], Exception) else stim_frame_times[x][0]  # type: ignore[index]
         ),
     )
+    if return_blocks:
+        return {k: stim_blocks.get(k, stim_frame_times[k]) for k in sorted_keys}
     return {k: stim_frame_times[k] for k in sorted_keys}
 
 

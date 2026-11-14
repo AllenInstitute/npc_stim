@@ -7,6 +7,7 @@ import importlib.metadata
 import logging
 
 # import functions from submodules here:
+from npc_stim.display_times import *
 from npc_stim.running import *
 from npc_stim.stim import *
 from npc_stim.types import *
