@@ -85,11 +85,23 @@ def test_slow_processing_file() -> None:
     assert t < 60, f"file with many missing diode flips is being processed too slowly: {t = }"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="666986_20230814 has replayed sync data (1273.0-1273.5 s), so get_display_times raises; "
+    "before the thread's exception was re-raised this test passed without checking anything. "
+    "Needs a replacement file with missing diode flips at the start of a block.",
+)
 def test_missing_diode_flips_at_start_of_block() -> None:
+    errors: list[BaseException] = []
+
     def helper() -> None:
-        _ = _display_times(
-            "s3://aind-ephys-data/ecephys_666986_2023-08-14_11-38-55/behavior/20230814T113855.h5"
-        )
+        try:
+            _ = _display_times(
+                "s3://aind-ephys-data/ecephys_666986_2023-08-14_11-38-55/behavior/20230814T113855.h5"
+            )
+        except BaseException as exc:  # an exception in a thread is otherwise swallowed
+            errors.append(exc)
 
     # launch job in a separate thread, then kill if it takes too long
     import threading
@@ -98,6 +110,8 @@ def test_missing_diode_flips_at_start_of_block() -> None:
     t.start()
     t.join(20)
     assert not t.is_alive(), "file with missing diode flips at start of block is taking too long to process"
+    if errors:
+        raise errors[0]
 
 
 def test_flips_outside_stim_running() -> None:
@@ -130,3 +144,51 @@ def test_plots(tmp_path: pathlib.Path) -> None:
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
+
+
+# anomalous diode-interval removal ------------------------------------------- #
+
+
+def _remove_anomalous_reference(flips, n, on):
+    """The original O(n^2) loop (npc_sync <= 0.2.9)."""
+    from npc_stim.display_times import anomalous_interval_indices
+
+    while any(anomalous_interval_indices(flips, n)):
+        indices = anomalous_interval_indices(flips, n)
+        flips = np.delete(flips, slice(indices[0], indices[0] + 2))
+        if 0 in indices:
+            on = not on
+    return flips, on
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_remove_anomalous_diode_flips_matches_original_loop(seed: int) -> None:
+    from npc_stim.display_times import FRAME_INTERVAL, remove_anomalous_diode_flips
+
+    rng = np.random.default_rng(seed)
+    for _ in range(200):
+        n = int(rng.choice([1, 1, 2, 3]))
+        k = int(rng.integers(3, 60))
+        iv = n * FRAME_INTERVAL * rng.choice([1, 1, 1, 2, 3], k) + rng.normal(0, 0.002, k)
+        f = np.cumsum(np.abs(iv))
+        for _ in range(int(rng.integers(0, 6))):  # short blips, incl. at the start/end
+            i = int(rng.integers(0, len(f)))
+            w = float(rng.choice([0.0005, 0.002, 0.004, 0.01]))
+            f = np.sort(np.concatenate([f, [f[i] + w / 3, f[i] + w]]))
+        on = bool(rng.integers(0, 2))
+        expected = _remove_anomalous_reference(f, n, on)
+        actual = remove_anomalous_diode_flips(f, n, on)
+        assert np.array_equal(actual[0], expected[0]) and actual[1] == expected[1]
+
+
+def test_remove_anomalous_diode_flips_is_fast() -> None:
+    """DRpilot_366122_20250109 (diodeBoxFrameInterval=2) has 54k anomalous intervals in one block:
+    the original loop ran for >30 min."""
+    from npc_stim.display_times import FRAME_INTERVAL, remove_anomalous_diode_flips
+
+    # box flips every 2 frames, with asymmetric thresholding: intervals alternate 1.25 / 2.75 frames
+    f = np.cumsum(np.tile([1.25, 2.75], 25_000) * FRAME_INTERVAL)
+    t0 = time.time()
+    out, _, n_removed = remove_anomalous_diode_flips(f, 2, True)
+    assert time.time() - t0 < 10
+    assert n_removed > 20_000
