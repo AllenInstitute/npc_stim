@@ -440,6 +440,7 @@ def get_display_times(
                 check_lengths=False,
                 check_vsyncs=True,
                 stim_id=stim_id,
+                vsync_rising_times=get_vsync_rising_edges(sync_data, vsyncs),
             )
         except (AssertionError, IndexError) as exc:
             if raise_on_error:
@@ -721,6 +722,45 @@ def correct_whole_block_frame_offset(
     )
 
 
+def get_vsync_rising_edges(
+    sync_data: npc_sync.SyncDataset, vsync_falling_edges: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """The rising edge of the frame signal preceding each falling edge (-inf if none)."""
+    rising = sync_data.get_rising_edges("vsync_stim", units="seconds")
+    idx = np.searchsorted(rising, vsync_falling_edges) - 1
+    return np.where(idx >= 0, rising[np.clip(idx, 0, None)], -np.inf)
+
+
+def place_frames_in_diode_interval(
+    slot_times: npt.ArrayLike,
+    lower_bounds: npt.ArrayLike,
+    targets: npt.ArrayLike,
+) -> list[float]:
+    """Assign N frames to screen refreshes ("slots") within one diode-box interval.
+
+    The first frame is the diode flip (slot 0). Each later frame gets the slot nearest its
+    target (vsync falling edge + average latency) among slots that are after the previous
+    frame's slot, at or after its lower bound (rising edge + min latency) where possible, and
+    leave enough slots for the remaining frames.
+
+    >>> place_frames_in_diode_interval([0, 1, 2, 3, 4, 5, 6], [-1, 4.5, 5], [0, 1, 2])
+    [0.0, 5.0, 6.0]
+    >>> place_frames_in_diode_interval([0, 1, 2, 3], [-1, 0, 0], [0, 1, 3])
+    [0.0, 1.0, 3.0]
+    """
+    slots = np.asarray(slot_times, dtype=float)
+    lower = np.asarray(lower_bounds, dtype=float)
+    target = np.asarray(targets, dtype=float)
+    n_frames, n_slots = len(target), len(slots)
+    chosen = [0]
+    for j in range(1, n_frames):
+        allowed = np.arange(chosen[-1] + 1, n_slots - (n_frames - 1 - j))
+        feasible = allowed[slots[allowed] >= lower[j]]
+        candidates = feasible if len(feasible) else allowed[-1:]
+        chosen.append(int(candidates[np.argmin(np.abs(slots[candidates] - target[j]))]))
+    return [float(slots[i]) for i in chosen]
+
+
 def adjust_diode_flip_intervals(
     diode_flips: npt.NDArray[np.floating],
 ) -> npt.NDArray[np.floating]:
@@ -825,7 +865,17 @@ def get_frame_display_times(
     check_lengths: bool = True,
     check_vsyncs: bool = True,
     stim_id: str | None = None,
+    vsync_rising_times: npt.NDArray | None = None,
 ) -> npt.NDArray[np.float64]:
+    """Estimate the display time of each frame from vsync falling edges and diode flips.
+
+    - `vsync_rising_times`: optional, the rising edge of the frame signal for each vsync (falling
+      edge). TaskControl raises the frame signal before drawing and calling `flip()`, and lowers it
+      after `flip()` returns, so a frame can't be displayed before its rising edge +
+      `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC`. The falling edge can be delayed by a stall after
+      `flip()` returns (the frame is displayed on time). Used when diodeBoxFrameInterval > 1 to
+      place frames within a diode interval that contains dropped refreshes.
+    """
     # first, shift vsyncs forwards in time by the monitor latency, so we can more easily match up
     # diode flips and vsyncs
     vsync_times = vsync_times + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
@@ -1218,6 +1268,22 @@ def get_frame_display_times(
                 # if the last interval is a long one nothing happens: inserting the next flip will
                 # produce the long interval
             assert len(new_times) == vsyncs_per_flip
+            if vsync_rising_times is not None and (idx + 1) * vsyncs_per_flip <= len(
+                vsync_rising_times
+            ):
+                frames = slice(idx * vsyncs_per_flip, (idx + 1) * vsyncs_per_flip)
+                lower_bound = (
+                    vsync_rising_times[frames] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+                )
+                if np.any(np.array(new_times)[1:] < lower_bound[1:]):
+                    # placement from vsync falling-edge intervals put a frame before its frame
+                    # signal went high: the falling edges are delayed (stall after flip()), so
+                    # place frames using the rising edges as a lower bound instead
+                    new_times = place_frames_in_diode_interval(
+                        slot_times=evenly_spaced_times,
+                        lower_bounds=lower_bound,
+                        targets=vsync_times[frames],  # already shifted by the average latency
+                    )
             assert flips[idx + 1] not in new_times, "prematurely added next flip"
             display_times.extend(new_times)
 
