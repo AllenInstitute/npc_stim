@@ -484,6 +484,13 @@ def get_display_times(
                 results.append(not_using_diode(msg, vsyncs_per_diode_flip))
                 continue
 
+        if len(times) == len(vsyncs):
+            times, msg = correct_whole_block_frame_offset(times, vsyncs)
+            if msg is not None:
+                logger.error(f"{stim_id}: Block {block_idx}: {msg}")
+                results.append(not_using_diode(msg, vsyncs_per_diode_flip))
+                continue
+
         results.append(
             BlockDisplayTimes(
                 block_index=block_idx,
@@ -662,6 +669,56 @@ def plot_diode_measured_sync_square_flips(
 
 
 # estimator ----------------------------------------------------------------- #
+
+
+def correct_whole_block_frame_offset(
+    display_times: npt.NDArray[np.float64],
+    vsyncs: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], str | None]:
+    """Check the block's median vsync-to-diode-flip latency against
+    `AVERAGE_VSYNC_TO_DIODE_FLIP_TIME` and correct a whole-block offset of +1 frame.
+
+    If the first diode flip of a block is missed (e.g. white-to-white transition from the
+    initializing screen, or flicker before the first frame), every frame is assigned the next
+    frame's flip, and the end of the block is padded. `get_frame_display_times` corrects this
+    with a vote over long (dropped-frame) intervals, but that vote is skipped for Spontaneous*
+    stims and can't run on blocks with few long intervals; enabling it for Spontaneous* stims
+    rejects blocks whose vsync falling edges are delayed (stall after `flip()`), so this check
+    uses the latency instead. Across 1,899 photodiode blocks without the offset the block
+    median latency is 27.2-32.5 ms (incl. `MONITOR_CENTER_REFRESH_TIME`); with it, ~44 ms.
+
+    Returns (display_times, None) if the median latency is within half a frame of the average
+    (unchanged) or one frame more (shifted: the first frame is inserted one median frame
+    interval before the first flip and the last, padded, frame is dropped). Otherwise returns
+    (display_times, reason) and the block should not use the photodiode.
+
+    >>> v = np.arange(100) / 59.95
+    >>> t, msg = correct_whole_block_frame_offset(v + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME, v)
+    >>> msg is None and bool(np.array_equal(t, v + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME))
+    True
+    >>> t, msg = correct_whole_block_frame_offset(v + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME + 1 / 59.95, v)
+    >>> msg is None and bool(np.allclose(t - v, AVERAGE_VSYNC_TO_DIODE_FLIP_TIME))
+    True
+    >>> correct_whole_block_frame_offset(v + 0.1, v)[1]
+    'median vsync-to-diode-flip latency is 100.0 ms: 5 frames more than expected (19.6 ms)'
+    """
+    latency = float(np.median(display_times - vsyncs))
+    n_frames = round((latency - AVERAGE_VSYNC_TO_DIODE_FLIP_TIME) / FRAME_INTERVAL)
+    if n_frames == 0:
+        return display_times, None
+    first_flip_latency = display_times[0] - vsyncs[0]
+    if n_frames == 1 and first_flip_latency > AVERAGE_VSYNC_TO_DIODE_FLIP_TIME + 0.5 * FRAME_INTERVAL:
+        logger.warning(
+            f"median vsync-to-diode-flip latency is {latency * 1e3:.1f} ms, one frame more than "
+            f"expected: assuming the first diode flip was missed. Inserting the first frame and "
+            "dropping the last"
+        )
+        interval = float(np.median(np.diff(display_times)))
+        return np.concatenate(([display_times[0] - interval], display_times[:-1])), None
+    return display_times, (
+        f"median vsync-to-diode-flip latency is {latency * 1e3:.1f} ms: {n_frames} frames "
+        f"{'more' if n_frames > 0 else 'less'} than expected ({AVERAGE_VSYNC_TO_DIODE_FLIP_TIME * 1e3:.1f} ms)"
+    )
 
 
 def adjust_diode_flip_intervals(
