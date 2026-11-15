@@ -1086,12 +1086,10 @@ def get_frame_display_times(
             min_long_interval_num = 3
             if len(long_vsync_misalignment) < min_long_interval_num:
                 # check vsyncs or stim file also have few long intervals
+                # - vsync intervals aren't discretized: count those over 1.5 frames (a dropped
+                #   refresh), not over `long_thr` (1.1 frames), which counts vsync jitter
                 assert (
-                    x := len(
-                        all_vsync_diffs[
-                            all_vsync_diffs > long_thr * median_refresh_interval
-                        ]
-                    )
+                    x := len(all_vsync_diffs[all_vsync_diffs > 1.5 * median_refresh_interval])
                 ) < min_long_interval_num * 2, f"{stim_id}: found fewer than {min_long_interval_num} long intervals in photodiode signal, but {x} long intervals in vsync signal"
                 pass
             elif len(
@@ -1238,7 +1236,12 @@ def get_frame_display_times(
                         while sum(long_refreshes) > n_dropped:
                             # remove one from the largest
                             long_refreshes[np.argmax(long_refreshes)] -= 1
-                        assert np.all(long_refreshes > 0)
+                        if not np.all(long_refreshes > 0):
+                            # more long vsync intervals than dropped refreshes (previously an
+                            # AssertionError): e.g. a falling edge delayed by a stall after flip()
+                            # gives a long-short pair of vsync intervals with no dropped refresh.
+                            # Place frames with `place_frames_in_diode_interval` below.
+                            long_idx = None
                     else:
                         msg = f"{stim_id} | Faulty locating of dropped frames - something doesn't add up: {vsync_intervals=}, {long_refreshes=} ({long_thr=})"
                         if (
@@ -1261,21 +1264,26 @@ def get_frame_display_times(
             i = -1
             for n in range(vsyncs_per_flip):
                 i += 1
-                if i - 1 in long_idx:
+                if long_idx is not None and i - 1 in long_idx:
                     i += int(long_refreshes[long_idx.index(i - 1)])
                 t = evenly_spaced_times[i]
                 new_times.append(t)
                 # if the last interval is a long one nothing happens: inserting the next flip will
                 # produce the long interval
             assert len(new_times) == vsyncs_per_flip
-            if vsync_rising_times is not None and (idx + 1) * vsyncs_per_flip <= len(
-                vsync_rising_times
-            ):
-                frames = slice(idx * vsyncs_per_flip, (idx + 1) * vsyncs_per_flip)
-                lower_bound = (
-                    vsync_rising_times[frames] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
-                )
-                if np.any(np.array(new_times)[1:] < lower_bound[1:]):
+            frames = slice(idx * vsyncs_per_flip, (idx + 1) * vsyncs_per_flip)
+            if (idx + 1) * vsyncs_per_flip <= len(vsync_times):
+                if vsync_rising_times is not None and (
+                    idx + 1
+                ) * vsyncs_per_flip <= len(vsync_rising_times):
+                    lower_bound = (
+                        vsync_rising_times[frames] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+                    )
+                else:
+                    lower_bound = np.full(vsyncs_per_flip, -np.inf)
+                if long_idx is None or np.any(
+                    np.array(new_times)[1:] < lower_bound[1:]
+                ):
                     # placement from vsync falling-edge intervals put a frame before its frame
                     # signal went high: the falling edges are delayed (stall after flip()), so
                     # place frames using the rising edges as a lower bound instead
