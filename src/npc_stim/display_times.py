@@ -7,7 +7,9 @@ estimator functions). npc_sync is now only responsible for line access, fault de
 block splitting; everything that interprets the stimulus (diode box, monitor latency, stim
 files) lives here.
 
-The estimator (`get_frame_display_times` and helpers) is unchanged from npc_sync 0.2.9.
+The estimator (`get_frame_display_times` and helpers) was moved unchanged from npc_sync 0.2.9;
+branch display-times-p2-fixes changes it (see the commit messages and
+npc_sessions/outputs/display-times-issues.md).
 Orchestration changes:
 
 - stim files are an explicit input (no globbing next to the sync file)
