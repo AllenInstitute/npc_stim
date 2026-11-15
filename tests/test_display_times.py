@@ -60,16 +60,10 @@ def test_diode_box_frame_interval_is_read_from_stim_file(tmp_path: pathlib.Path)
     assert npc_stim.get_diode_box_frame_interval(current) == 3
 
 
-def test_missing_diode_box_frame_interval_only_accepted_before_key_existed(
-    tmp_path: pathlib.Path,
-) -> None:
-    old = _write_stim(tmp_path / "old.hdf5", "20250101_120000", None)
-    assert npc_stim.get_diode_box_frame_interval(old) == 1
-    last = _write_stim(tmp_path / "last.hdf5", "20250714_175002", None)
-    assert npc_stim.get_diode_box_frame_interval(last) == 1
-    new = _write_stim(tmp_path / "new.hdf5", "20250801_120000", None)
-    with pytest.raises(KeyError):
-        npc_stim.get_diode_box_frame_interval(new)
+def test_missing_diode_box_frame_interval_is_1(tmp_path: pathlib.Path) -> None:
+    for start in ("20230101_120000", "20250714_175002", "20260101_120000"):
+        path = _write_stim(tmp_path / f"{start}.hdf5", start, None)
+        assert npc_stim.get_diode_box_frame_interval(path) == 1
 
 
 # known files (S3) ----------------------------------------------------------------- #

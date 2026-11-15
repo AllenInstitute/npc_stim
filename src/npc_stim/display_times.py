@@ -20,7 +20,6 @@ Orchestration changes:
 from __future__ import annotations
 
 import dataclasses
-import datetime
 import logging
 import os
 from collections.abc import Iterable, Mapping, Sequence
@@ -71,13 +70,6 @@ DIODE_EDGE_END_PADDING_SEC = 10 * FRAME_INTERVAL
 SUSPICIOUS_INTERVAL_THRESHOLD = 0.3 / FRAME_RATE
 DEFINITE_SHORT_INTERVAL_THRESHOLD = 0.05 / FRAME_RATE
 # at 60 fps we should never have diode-flip intervals this small: consider them anomalous
-
-LAST_DATE_WITHOUT_DIODE_BOX_FRAME_INTERVAL = datetime.date(2025, 7, 14)
-"""`diodeBoxFrameInterval` was added to TaskControl on 2025-07-14
-(samgale/DynamicRoutingTask@11b32f5); before it, the diode box flipped on every frame. In the
-Task 2 pilot ephys sessions (2,415 stim files), every file up to 2025-07-14 17:50 lacks the key
-and every file from 2025-07-15 has it, so a missing key means 1 only for stim files that
-started on or before this date."""
 
 DisplayTimeSource: TypeAlias = Literal["photodiode", "constant_lag", "unavailable"]
 Fallback: TypeAlias = Union[Literal["constant_lag"], None]
@@ -145,22 +137,16 @@ def assert_sync_frame_timing_is_valid(sync: npc_sync.SyncPathOrDataset) -> None:
 def get_diode_box_frame_interval(stim_path_or_data: npc_io.PathLike | h5py.File) -> int:
     """Number of frames between diode-box flips, from the stim file.
 
-    Stim files that started on or before `LAST_DATE_WITHOUT_DIODE_BOX_FRAME_INTERVAL` have
-    no `diodeBoxFrameInterval` key and flipped the diode box on every frame (1). A missing key
-    in a later file raises `KeyError`.
+    Files written by TaskControl before `diodeBoxFrameInterval` existed
+    (samgale/DynamicRoutingTask@11b32f5) have no key and flipped the box on every frame (1).
     """
     stim_data = npc_stim.stim.get_h5_stim_data(stim_path_or_data)
-    if "diodeBoxFrameInterval" in stim_data:
-        value = stim_data["diodeBoxFrameInterval"]
-        if isinstance(value, h5py.Dataset):
-            value = value[()]
-        return int(value)
-    start = npc_stim.stim.get_stim_start_time(stim_data)
-    if start.date() <= LAST_DATE_WITHOUT_DIODE_BOX_FRAME_INTERVAL:
+    if "diodeBoxFrameInterval" not in stim_data:
         return 1
-    raise KeyError(
-        f"diodeBoxFrameInterval missing from stim file started {start}: expected in files after {LAST_DATE_WITHOUT_DIODE_BOX_FRAME_INTERVAL}"
-    )
+    value = stim_data["diodeBoxFrameInterval"]
+    if isinstance(value, h5py.Dataset):
+        value = value[()]
+    return int(value)
 
 
 def get_expected_diode_flip_rate(sync: npc_sync.SyncPathOrDataset) -> int:
