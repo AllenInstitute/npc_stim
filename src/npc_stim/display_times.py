@@ -371,6 +371,13 @@ def get_display_times(
             results.append(not_using_diode(msg, None))
             continue
 
+        if not len(rising) or not len(falling):
+            # previously an IndexError that failed the whole session (DRpilot_796848_20250715)
+            msg = f"no diode {'rising' if not len(rising) else 'falling'} edges between the block's first vsync and {MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after its last"
+            logger.warning(f"{sync_data} block {block_idx}: {msg}")
+            results.append(not_using_diode(msg, None))
+            continue
+
         is_first_frame_on = rising[0] < falling[0]  # may be updated below
 
         stim_data = npc_stim.stim.get_h5_stim_data(stim_path)
@@ -487,6 +494,23 @@ def get_display_times(
 
         if len(times) == len(vsyncs):
             times, msg = correct_whole_block_frame_offset(times, vsyncs)
+            if msg is None:
+                # replaces the disabled `display >= vsync` assert: vsync falling edges can be
+                # delayed by a stall after flip(), but a frame can't be displayed before its
+                # frame signal went high (+ the minimum vsync-to-flip latency)
+                n_early = int(
+                    np.sum(
+                        times
+                        < get_vsync_rising_edges(sync_data, vsyncs)
+                        + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+                    )
+                )
+                if n_early:
+                    msg = (
+                        f"{n_early} frame(s) have a diode flip less than "
+                        f"{MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after their vsync rising edge "
+                        "(frame signal raised before draw + flip): flips are misassigned"
+                    )
             if msg is not None:
                 logger.error(f"{stim_id}: Block {block_idx}: {msg}")
                 results.append(not_using_diode(msg, vsyncs_per_diode_flip))
