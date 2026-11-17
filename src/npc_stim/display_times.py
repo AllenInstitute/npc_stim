@@ -170,7 +170,9 @@ def check_stim_photodiode(sync: npc_sync.SyncPathOrDataset) -> None:
     try:
         _ = get_expected_diode_flip_rate(sync)
     except ValueError as exc:
-        raise AssertionError("Frame rate estimated from diode flips is abnormal.") from exc
+        raise AssertionError(
+            "Frame rate estimated from diode flips is abnormal."
+        ) from exc
 
 
 def get_constant_lag_display_time_blocks(
@@ -466,9 +468,7 @@ def get_display_times(
                 )
             )
             results.append(
-                not_using_diode(
-                    f"estimator failed: {exc!r}", vsyncs_per_diode_flip
-                )
+                not_using_diode(f"estimator failed: {exc!r}", vsyncs_per_diode_flip)
             )
             continue
 
@@ -737,7 +737,10 @@ def correct_whole_block_frame_offset(
     if n_frames == 0:
         return display_times, None
     first_flip_latency = display_times[0] - vsyncs[0]
-    if n_frames == 1 and first_flip_latency > AVERAGE_VSYNC_TO_DIODE_FLIP_TIME + 0.5 * FRAME_INTERVAL:
+    if (
+        n_frames == 1
+        and first_flip_latency > AVERAGE_VSYNC_TO_DIODE_FLIP_TIME + 0.5 * FRAME_INTERVAL
+    ):
         logger.warning(
             f"median vsync-to-diode-flip latency is {latency * 1e3:.1f} ms, one frame more than "
             f"expected: assuming the first diode flip was missed. Inserting the first frame and "
@@ -1118,7 +1121,9 @@ def get_frame_display_times(
                 # - vsync intervals aren't discretized: count those over 1.5 frames (a dropped
                 #   refresh), not over `long_thr` (1.1 frames), which counts vsync jitter
                 assert (
-                    x := len(all_vsync_diffs[all_vsync_diffs > 1.5 * median_refresh_interval])
+                    x := len(
+                        all_vsync_diffs[all_vsync_diffs > 1.5 * median_refresh_interval]
+                    )
                 ) < min_long_interval_num * 2, f"{stim_id}: found fewer than {min_long_interval_num} long intervals in photodiode signal, but {x} long intervals in vsync signal"
                 pass
             elif len(
@@ -1319,7 +1324,9 @@ def get_frame_display_times(
                     new_times = place_frames_in_diode_interval(
                         slot_times=evenly_spaced_times,
                         lower_bounds=lower_bound,
-                        targets=vsync_times[frames],  # already shifted by the average latency
+                        targets=vsync_times[
+                            frames
+                        ],  # already shifted by the average latency
                     )
             assert flips[idx + 1] not in new_times, "prematurely added next flip"
             display_times.extend(new_times)
@@ -1464,4 +1471,3 @@ def asym_round(
         lower_values = np.maximum(np.floor(x), np.ones_like(x))
     # avoid using x - np.floor(x) which will incur floating point errors:
     return np.where(x < np.floor(x) + threshold, lower_values, np.ceil(x)).astype(int)
-
