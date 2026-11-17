@@ -106,23 +106,41 @@ class BlockDisplayTimes:
     """Frames per diode-box flip, from the stim file (None if no stim file)."""
     reason: str | None = None
     """Why the photodiode was not used (None if it was)."""
+    frame_source: npt.NDArray[np.int8] | None = None
+    """Per frame: 0 (measured) or 1 (interpolated: the frame's vsync, or the diode edge its
+    display time comes from, was reconstructed by the sync file's `SyncPatch` inside a
+    replayed interval). None if the sync file has no patch (all measured)."""
 
     @property
     def is_photodiode(self) -> bool:
         return self.source == "photodiode"
 
+    @property
+    def n_interpolated(self) -> int:
+        return 0 if self.frame_source is None else int(np.sum(self.frame_source == 1))
+
+
+def _is_patched_for_display_times(sync_data: npc_sync.SyncDataset) -> bool:
+    """The sync file's replayed intervals are covered by a `SyncPatch` for both the vsync and
+    photodiode lines (spans may still be 'unknown': those blocks are rejected individually)."""
+    patch = getattr(sync_data, "patch", None)
+    return patch is not None and all(
+        patch.covers(line) for line in ("vsync_stim", "stim_photodiode")
+    )
+
 
 def assert_sync_frame_timing_is_valid(sync: npc_sync.SyncPathOrDataset) -> None:
     """Raise `AssertionError` if the sync file contains replayed data (see
-    `SyncDataset.invalid_intervals`) or a timebase discontinuity (see
-    `SyncDataset.timebase_discontinuities`), since vsync and diode edges can't be trusted.
+    `SyncDataset.invalid_intervals`) that isn't covered by a `SyncPatch` for the vsync and
+    photodiode lines, or a timebase discontinuity (see `SyncDataset.timebase_discontinuities`),
+    since vsync and diode edges can't be trusted.
     """
     sync_data = npc_sync.get_sync_data(sync)
-    if sync_data.invalid_intervals:
+    if sync_data.invalid_intervals and not _is_patched_for_display_times(sync_data):
         raise AssertionError(
             f"{sync_data} contains replayed sync data (all lines invalid) at "
             + ", ".join(f"{a:.3f}-{z:.3f} s" for a, z in sync_data.invalid_intervals)
-            + ": frame display times can't be computed reliably"
+            + ": frame display times can't be computed reliably without a SyncPatch"
         )
     if sync_data.timebase_discontinuities:
         raise AssertionError(
@@ -322,11 +340,48 @@ def get_display_times(
     - `raise_on_error`: re-raise errors from the estimator instead of recording the block as
       not using the photodiode.
 
-    Raises `AssertionError` if the sync file contains replayed data or a timebase
-    discontinuity (see `assert_sync_frame_timing_is_valid`).
+    Raises `AssertionError` if the sync file contains replayed data not covered by a
+    `SyncPatch`, or a timebase discontinuity (see `assert_sync_frame_timing_is_valid`). With
+    a patch: blocks overlapping a span where the vsync or photodiode line is 'unknown' get no
+    display times; elsewhere frames whose vsync or diode edge was reconstructed are marked in
+    `BlockDisplayTimes.frame_source`.
     """
     sync_data = npc_sync.get_sync_data(sync)
     assert_sync_frame_timing_is_valid(sync_data)
+    patched = bool(sync_data.invalid_intervals) and _is_patched_for_display_times(
+        sync_data
+    )
+    if patched:
+        unknown = sync_data.get_unknown_intervals(
+            "vsync_stim"
+        ) + sync_data.get_unknown_intervals("stim_photodiode")
+        all_vsyncs = sync_data.get_falling_edges("vsync_stim", units="seconds")
+        vsync_src = sync_data.get_edge_sources("vsync_stim", "falling")
+        diode_src = np.concatenate(
+            [
+                sync_data.get_edge_sources("stim_photodiode", "rising"),
+                sync_data.get_edge_sources("stim_photodiode", "falling"),
+            ]
+        )
+        # spans where diode edges were reconstructed; display times up to one diode interval
+        # after a span are placed relative to a reconstructed edge
+        reconstructed_diode_spans = [
+            (sp.span[0], sp.span[1] + 0.1)
+            for sp in sync_data.patch.lines.get("stim_photodiode", [])
+            if sp.status == "reconstructed" and (diode_src == 1).any()
+        ]
+
+    def frame_source(
+        vsyncs: npt.NDArray[np.float64], display: npt.NDArray[np.float64] | None
+    ) -> npt.NDArray[np.int8] | None:
+        if not patched:
+            return None
+        idx = np.searchsorted(all_vsyncs, vsyncs)
+        src = vsync_src[np.clip(idx, 0, len(vsync_src) - 1)].astype(np.int8)
+        if display is not None and reconstructed_diode_spans:
+            src[npc_sync.in_intervals(display, reconstructed_diode_spans)] = 1
+        return src
+
     vsync_times_in_blocks = sync_data.vsync_times_in_blocks
     block_to_stim_path = _get_block_to_stim_path(sync_data, stim_paths)
     diode_rising_edges_in_blocks, diode_falling_edges_in_blocks = (
@@ -343,6 +398,24 @@ def get_display_times(
     ):
         stim_path = block_to_stim_path.get(block_idx)
 
+        if patched and any(
+            a <= vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC and z >= vsyncs[0]
+            for a, z in unknown
+        ):
+            msg = "block overlaps a replayed sync interval that the SyncPatch couldn't reconstruct for vsync/photodiode"
+            logger.warning(f"{sync_data} block {block_idx}: {msg}")
+            results.append(
+                BlockDisplayTimes(
+                    block_index=block_idx,
+                    stim_path=stim_path,
+                    vsync_times=vsyncs,
+                    display_times=None,
+                    source="unavailable",
+                    reason=msg,
+                )
+            )
+            continue
+
         def not_using_diode(
             reason: str, vsyncs_per_diode_flip: int | None
         ) -> BlockDisplayTimes:
@@ -358,6 +431,9 @@ def get_display_times(
                 source="constant_lag" if fallback == "constant_lag" else "unavailable",
                 diode_box_frame_interval=vsyncs_per_diode_flip,
                 reason=reason,
+                frame_source=(
+                    frame_source(vsyncs, None) if fallback == "constant_lag" else None
+                ),
             )
 
         # keep flips after first vsync + an empirically determined min latency
@@ -529,6 +605,7 @@ def get_display_times(
                 display_times=times + MONITOR_CENTER_REFRESH_TIME,
                 source="photodiode",
                 diode_box_frame_interval=vsyncs_per_diode_flip,
+                frame_source=frame_source(vsyncs, times),
             )
         )
         logger.info(f"Added frame display times for {stim_path}")
