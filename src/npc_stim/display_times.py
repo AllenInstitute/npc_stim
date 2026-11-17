@@ -409,13 +409,16 @@ def get_display_times(
                 return (off, on)
 
         flips = concat_flips(rising, falling)
-        flips, is_first_frame_on, n_removed = remove_anomalous_diode_flips(
-            flips, vsyncs_per_diode_flip, is_first_frame_on
-        )
-        if n_removed:
+        while any(anomalous_interval_indices(flips, vsyncs_per_diode_flip)):
+
+            indices = anomalous_interval_indices(flips, vsyncs_per_diode_flip)
+            # just delete one interval then check again:
             logger.warning(
-                f"Removed {n_removed} anomalous short diode intervals in block {block_idx}"
+                f"Removing anomalous short diode interval in block {block_idx}"
             )
+            flips = np.delete(flips, slice(indices[0], indices[0] + 2))
+            if 0 in indices:
+                is_first_frame_on = not is_first_frame_on
 
         # one flip per `vsyncs_per_diode_flip` frames. For N > 1 this check didn't exist: a block
         # whose flips were mostly removed above would get almost all of its display times invented
@@ -1407,89 +1410,6 @@ def is_part_of_normal_pair(
         break
 
     return result
-
-
-def _is_anomalous_interval(
-    flips: list[float], idx: int, num_vsyncs_per_diode_flip: float
-) -> bool:
-    """Same test as `anomalous_interval_indices` for the single interval `flips[idx + 1] - flips[idx]`."""
-    n_intervals = len(flips) - 1
-    interval = flips[idx + 1] - flips[idx]
-    if not (
-        interval
-        < ((num_vsyncs_per_diode_flip - 1) * FRAME_INTERVAL)
-        + SUSPICIOUS_INTERVAL_THRESHOLD
-    ):
-        return False
-    if num_vsyncs_per_diode_flip > 1 and idx == n_intervals - 1:
-        return False
-    if num_vsyncs_per_diode_flip == 1 and is_part_of_normal_pair(
-        prev_interval_dur=flips[idx] - flips[idx - 1] if idx - 1 >= 0 else None,
-        suspicious_interval_dur=interval,
-        next_interval_dur=(
-            flips[idx + 2] - flips[idx + 1] if idx + 1 < n_intervals else None
-        ),
-    ):
-        return False
-    return True
-
-
-def remove_anomalous_diode_flips(
-    flips: npt.ArrayLike,
-    num_vsyncs_per_diode_flip: int,
-    is_first_frame_on: bool,
-) -> tuple[npt.NDArray[np.float64], bool, int]:
-    """Repeatedly delete the pair of flips enclosing the first anomalous interval (see
-    `anomalous_interval_indices`) until none are left, toggling `is_first_frame_on` when the
-    first interval is deleted. Returns (flips, is_first_frame_on, n_pairs_removed).
-
-    Gives the same result as the original loop (npc_sync <= 0.2.9)::
-
-        while any(anomalous_interval_indices(flips, n)):
-            indices = anomalous_interval_indices(flips, n)
-            flips = np.delete(flips, slice(indices[0], indices[0] + 2))
-            if 0 in indices:
-                is_first_frame_on = not is_first_frame_on
-
-        including its quirk that an anomaly at index 0 alone doesn't trigger a deletion
-        (`any([0])` is False), but is deleted first when any other anomaly exists.
-
-    The original rescanned the whole block after every deletion (O(n^2): >30 min for a block
-    with 54k anomalous intervals). Deleting flips i, i+1 only changes the status of intervals
-    i-2 and i-1 (each interval's status depends on itself and its neighbours), so after a
-    deletion the scan resumes from i-2.
-
-    >>> f = np.array([0.0, 1, 2, 2.001, 3, 4]) / 59.95
-    >>> out, on, n = remove_anomalous_diode_flips(f, 1, True)
-    >>> (np.round(out * 59.95, 3).tolist(), on, n)
-    ([0.0, 1.0, 3.0, 4.0], True, 1)
-    """
-    f = [float(x) for x in np.asarray(flips)]
-    n_removed = 0
-    start = 1
-    while True:
-        zero_is_anomalous = len(f) > 1 and _is_anomalous_interval(
-            f, 0, num_vsyncs_per_diode_flip
-        )
-        first_nonzero = next(
-            (
-                i
-                for i in range(start, len(f) - 1)
-                if _is_anomalous_interval(f, i, num_vsyncs_per_diode_flip)
-            ),
-            None,
-        )
-        if first_nonzero is None:
-            break
-        idx = 0 if zero_is_anomalous else first_nonzero
-        del f[idx : idx + 2]
-        n_removed += 1
-        if idx == 0:
-            is_first_frame_on = not is_first_frame_on
-            start = 1
-        else:
-            start = max(1, idx - 2)
-    return np.array(f, dtype=np.float64), is_first_frame_on, n_removed
 
 
 def anomalous_interval_indices(flips, num_vsyncs_per_diode_flip: float):
