@@ -32,7 +32,7 @@ import dataclasses
 import logging
 import os
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import h5py
 import npc_io
@@ -41,7 +41,6 @@ import numpy as np
 import numpy.typing as npt
 import scipy.signal
 import upath
-from typing_extensions import TypeAlias
 
 import npc_stim.stim
 
@@ -81,7 +80,7 @@ DEFINITE_SHORT_INTERVAL_THRESHOLD = 0.05 / FRAME_RATE
 # at 60 fps we should never have diode-flip intervals this small: consider them anomalous
 
 DisplayTimeSource: TypeAlias = Literal["photodiode", "constant_lag", "unavailable"]
-Fallback: TypeAlias = Union[Literal["constant_lag"], None]
+Fallback: TypeAlias = Literal["constant_lag"] | None
 
 
 def get_plot_dir(mkdir: bool = False) -> upath.UPath | None:
@@ -129,7 +128,8 @@ class BlockDisplayTimes:
 
 def _is_patched_for_display_times(sync_data: npc_sync.SyncDataset) -> bool:
     """The sync file's replayed intervals are covered by a `SyncPatch` for both the vsync and
-    photodiode lines (spans may still be 'unknown': those blocks are rejected individually)."""
+    photodiode lines (spans may still be 'unknown': those blocks are rejected individually).
+    """
     patch = getattr(sync_data, "patch", None)
     return patch is not None and all(
         patch.covers(line) for line in ("vsync_stim", "stim_photodiode")
@@ -323,9 +323,12 @@ def get_diode_edges_in_blocks(
     return tuple(diode_rising_edges_in_blocks), tuple(diode_falling_edges_in_blocks)
 
 
-def _diode_block_record(sync_data: npc_sync.SyncDataset, vsyncs: npt.NDArray) -> object | None:
+def _diode_block_record(
+    sync_data: npc_sync.SyncDataset, vsyncs: npt.NDArray
+) -> object | None:
     """The sync patch's photodiode record for the block of `vsyncs`
-    (`npc_sync.SyncPatch.diode_blocks`), or None (no patch, or an npc_sync without records)."""
+    (`npc_sync.SyncPatch.diode_blocks`), or None (no patch, or an npc_sync without records).
+    """
     patch = getattr(sync_data, "patch", None)
     if patch is None or not hasattr(patch, "diode_block"):
         return None

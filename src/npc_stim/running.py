@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 import npc_io
 import npc_sync

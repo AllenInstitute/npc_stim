@@ -8,13 +8,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 <!-- insertion marker -->
 ## Unreleased
 
-<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.23...HEAD)</small>
+<small>[Compare with latest](https://github.com/AllenInstitute/npc_stim/compare/v0.1.24...HEAD)</small>
+
+<!-- insertion marker -->
+## [v0.1.24](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.24) - 2026-11-17
+
+<small>[Compare with v0.1.23](https://github.com/AllenInstitute/npc_stim/compare/v0.1.23...v0.1.24)</small>
 
 ### Added
 
 - Add display_times: frame display-time estimation moved from npc_sync ([945f1f6](https://github.com/AllenInstitute/npc_stim/commit/945f1f66fae4fc2f6afab9df66c7c76f5d0872c3) by bjhardcastle).
 
-<!-- insertion marker -->
 ## [v0.1.23](https://github.com/AllenInstitute/npc_stim/releases/tag/v0.1.23) - 2026-09-24
 
 <small>[Compare with v0.1.22](https://github.com/AllenInstitute/npc_stim/compare/v0.1.22...v0.1.23)</small>
