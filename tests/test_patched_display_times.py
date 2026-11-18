@@ -109,3 +109,122 @@ def test_patch_without_stim_block_rejects_only_that_block(tmp_path) -> None:
     patch = P.build_sync_patch(raw, [], builder="test")  # vsync can't be reconstructed
     (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
     assert block.source == "unavailable" and "couldn't reconstruct" in block.reason
+
+
+# phantom flicker (diodeBoxFrameInterval 1): the SyncPatch removes it, npc_stim consumes the
+# cleaned line without removing edges itself ------------------------------------------------- #
+
+R = 1 / 60
+LAT_R, LAT_F = 0.020, 0.024
+
+
+def _box1_files(tmp: pathlib.Path, phantom_pairs: dict[int, list[int]], name: str):
+    """Box-1 block: 4000 frames with held frames; phantom flicker = one-refresh flashes of the
+    other buffer during holds (TTL: first edge 3 ms late, restoring edge on time)."""
+    n = 4000
+    holds = {700: 3, 1500: 2, 1520: 4, 2400: 11, 3000: 3, 3300: 3, 3600: 2}
+    n_ref = np.ones(n - 1, int)
+    for k, h in holds.items():
+        n_ref[k] = h
+    display = 5.0 + np.r_[0, np.cumsum(n_ref)] * R
+    rng = np.random.default_rng(1)
+    fall = display + 0.0002 + rng.normal(0, 2e-5, n)
+    fi = np.diff(fall)
+    edges = []
+    for t in fall:
+        edges += [(t - 0.015, 2, 1), (t, 2, 0)]
+    pol = 1
+    for k in range(n):
+        edges.append((display[k] + (LAT_R if pol else LAT_F), 4, pol))
+        for r in phantom_pairs.get(k, []):
+            edges.append((display[k] + r * R + (LAT_R if 1 - pol else LAT_F) + 0.003, 4, 1 - pol))
+            edges.append((display[k] + (r + 1) * R + (LAT_R if pol else LAT_F), 4, pol))
+        pol ^= 1
+    edges += [(4.95, 5, 1), (fall[-1] + 0.05, 5, 0)]
+    items = sorted((int(round(t * FS)), b, v) for t, b, v in edges)
+    times, states, state = [0], [0], 0
+    for s, b, v in items:
+        state = (state | (1 << b)) if v else (state & ~(1 << b))
+        if times[-1] == s:
+            states[-1] = state
+        else:
+            times.append(s)
+            states.append(state)
+    sync = tmp / f"{name}.h5"
+    meta = {
+        "ni_daq": {"sample_freq": float(FS), "counter_bits": 32, "event_bits": 32},
+        "start_time": "2026-01-01 10:00:00.000000",
+        "stop_time": "2026-01-01 10:01:40.000000",
+        "line_labels": LABELS,
+        "timeouts": [],
+        "version": "synthetic",
+        "total_samples": 100 * FS,
+    }
+    with h5py.File(sync, "w") as f:
+        f["data"] = np.c_[np.asarray(times, np.uint32), np.asarray(states, np.uint32)]
+        f["meta"] = str(meta)
+    stim = tmp / f"DynamicRouting1_000000_20260101_100004_{name}.hdf5"
+    with h5py.File(stim, "w") as f:
+        f["frameIntervals"] = fi
+        f["startTime"] = b"20260101_100004"
+        f["diodeBoxFrameInterval"] = 1
+    return sync, stim, fi, display
+
+
+PAIRS = {700: [1], 2400: [1, 3, 5, 7], 3000: [1], 3300: [1]}
+
+needs_flicker_patch = pytest.mark.skipif(
+    not hasattr(npc_sync, "align_diode_toggles"), reason="npc_sync without phantom-flicker removal"
+)
+
+
+@needs_flicker_patch
+def test_phantom_flicker_rejects_block_without_patch(tmp_path) -> None:
+    sync, stim, fi, display = _box1_files(tmp_path, PAIRS, "flicker")
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync), [stim])
+    assert block.source == "unavailable" and "diode flips" in block.reason
+
+
+@needs_flicker_patch
+def test_patch_cleaned_line_is_consumed_without_further_removal(tmp_path, monkeypatch) -> None:
+    sync, stim, fi, display = _box1_files(tmp_path, PAIRS, "flicker")
+    raw = npc_sync.SyncDataset(sync)
+    patch = P.build_sync_patch(raw, [P.StimBlock(0, fi, 1, "synthetic")], builder="test")
+    (rec,) = patch.diode_blocks
+    assert rec.status == "cleaned" and rec.n_phantom_flicker == 2 * sum(len(v) for v in PAIRS.values())
+
+    def no_removal(*args, **kwargs):
+        raise AssertionError("npc_stim must not remove diode edges from a line the SyncPatch cleaned")
+
+    monkeypatch.setattr(npc_stim.display_times, "anomalous_interval_indices", no_removal)
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
+    assert block.source == "photodiode", block.reason
+    assert len(block.display_times) == len(display)
+    # toggle frames ("on" flips) are exact; the others are interpolated by the estimator
+    on = np.arange(0, len(display), 2)
+    expected = display + LAT_R + npc_stim.display_times.MONITOR_CENTER_REFRESH_TIME
+    assert np.max(np.abs(block.display_times[on] - expected[on])) < 2e-5
+
+
+@needs_flicker_patch
+def test_patch_rejected_block_is_unavailable(tmp_path) -> None:
+    sync, stim, fi, display = _box1_files(tmp_path, PAIRS, "flicker")
+    raw = npc_sync.SyncDataset(sync)
+    patch = P.build_sync_patch(raw, [P.StimBlock(0, fi, 1, "synthetic")], builder="test")
+    patch.diode_blocks[0].status = "rejected"
+    patch.diode_blocks[0].reason = "test"
+    patch.removed = {}
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
+    assert block.source == "unavailable" and "SyncPatch rejected" in block.reason
+
+
+@needs_flicker_patch
+def test_clean_block_is_unchanged_by_the_patch(tmp_path) -> None:
+    sync, stim, fi, display = _box1_files(tmp_path, {}, "clean")
+    raw = npc_sync.SyncDataset(sync)
+    patch = P.build_sync_patch(raw, [P.StimBlock(0, fi, 1, "synthetic")], builder="test")
+    assert patch.diode_blocks[0].status == "cleaned" and patch.removed == {}
+    (a,) = npc_stim.get_display_times(raw, [stim])
+    (b,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
+    assert a.source == b.source == "photodiode"
+    assert np.array_equal(a.display_times, b.display_times)

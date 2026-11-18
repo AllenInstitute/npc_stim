@@ -17,6 +17,13 @@ Orchestration changes:
   `diodeBoxFrameInterval` key is only accepted for files that pre-date the key
 - the constant-lag fallback and re-raising errors are explicit parameters rather than env
   vars, and the source of each block's times is returned with the times
+
+Photodiode phantom flicker (extra edges while a frame is held, diodeBoxFrameInterval 1) and
+comparator glitches are removed by the sync file's `npc_sync.SyncPatch`, which also records per
+block whether every diode edge was explained (`SyncPatch.diode_blocks`). For a block the patch
+'cleaned', the estimator consumes the line as patched and does not remove edges itself (no
+anomalous-interval removal); a block the patch 'rejected' gets no display times. Other blocks
+(no patch, box interval > 1, not checked) keep the estimator's own handling.
 """
 
 from __future__ import annotations
@@ -217,7 +224,15 @@ def get_diode_edges_in_blocks(
     diode_falling_edges = sync_data.get_falling_edges(
         "stim_photodiode", units="seconds"
     )
-    assert abs(len(diode_rising_edges) - len(diode_falling_edges)) < 2
+    # edges alternate, so each span of a SyncPatch with the line 'unknown' (edges removed, none
+    # replacing them) can unbalance the counts by one (DRpilot_644867_20230221: 7 spans); the
+    # blocks overlapping them are rejected in `get_display_times`
+    n_unknown = (
+        len(sync_data.get_unknown_intervals("stim_photodiode"))
+        if getattr(sync_data, "patch", None) is not None
+        else 0
+    )
+    assert abs(len(diode_rising_edges) - len(diode_falling_edges)) < 2 + n_unknown
     diode_rising_edges_in_blocks = sync_data.get_edges_in_blocks(
         "stim_photodiode", "rising", end_padding=DIODE_EDGE_END_PADDING_SEC
     )
@@ -306,6 +321,15 @@ def get_diode_edges_in_blocks(
                     if i != idx
                 )
     return tuple(diode_rising_edges_in_blocks), tuple(diode_falling_edges_in_blocks)
+
+
+def _diode_block_record(sync_data: npc_sync.SyncDataset, vsyncs: npt.NDArray) -> object | None:
+    """The sync patch's photodiode record for the block of `vsyncs`
+    (`npc_sync.SyncPatch.diode_blocks`), or None (no patch, or an npc_sync without records)."""
+    patch = getattr(sync_data, "patch", None)
+    if patch is None or not hasattr(patch, "diode_block"):
+        return None
+    return patch.diode_block(float(vsyncs[0]), float(vsyncs[-1]))
 
 
 def _get_block_to_stim_path(
@@ -398,6 +422,23 @@ def get_display_times(
     ):
         stim_path = block_to_stim_path.get(block_idx)
 
+        diode_record = _diode_block_record(sync_data, vsyncs)
+        if diode_record is not None and diode_record.status == "rejected":
+            msg = f"SyncPatch rejected the block's photodiode edges: {diode_record.reason}"
+            logger.warning(f"{sync_data} block {block_idx}: {msg}")
+            results.append(
+                BlockDisplayTimes(
+                    block_index=block_idx,
+                    stim_path=stim_path,
+                    vsync_times=vsyncs,
+                    display_times=None,
+                    source="unavailable",
+                    reason=msg,
+                )
+            )
+            continue
+        diode_cleaned = diode_record is not None and diode_record.status == "cleaned"
+
         if patched and any(
             a <= vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC and z >= vsyncs[0]
             for a, z in unknown
@@ -487,7 +528,11 @@ def get_display_times(
                 return (off, on)
 
         flips = concat_flips(rising, falling)
-        while any(anomalous_interval_indices(flips, vsyncs_per_diode_flip)):
+        # a block whose diode edges the SyncPatch cleaned is used as patched: the patch is the
+        # one place where edges are removed (phantom flicker, glitches), so don't remove more
+        while not diode_cleaned and any(
+            anomalous_interval_indices(flips, vsyncs_per_diode_flip)
+        ):
 
             indices = anomalous_interval_indices(flips, vsyncs_per_diode_flip)
             # just delete one interval then check again:
