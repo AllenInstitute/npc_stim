@@ -622,8 +622,9 @@ def get_display_times(
             times, msg = correct_whole_block_frame_offset(times, vsyncs)
             if msg is None:
                 # replaces the disabled `display >= vsync` assert: vsync falling edges can be
-                # delayed by a stall after flip(), but a frame can't be displayed before its
-                # frame signal went high (+ the minimum vsync-to-flip latency)
+                # late (a delay between the buffer swap and the falling-edge write), but a frame
+                # can't be displayed before its frame signal went high (+ the minimum
+                # vsync-to-flip latency)
                 n_early = int(
                     np.sum(
                         times
@@ -835,7 +836,7 @@ def correct_whole_block_frame_offset(
     frame's flip, and the end of the block is padded. `get_frame_display_times` corrects this
     with a vote over long (dropped-frame) intervals, but that vote is skipped for Spontaneous*
     stims and can't run on blocks with few long intervals; enabling it for Spontaneous* stims
-    rejects blocks whose vsync falling edges are delayed (stall after `flip()`), so this check
+    rejects blocks whose vsync falling edges are late (see `get_frame_display_times`), so this check
     uses the latency instead. Across 1,899 photodiode blocks without the offset the block
     median latency is 27.2-32.5 ms (incl. `MONITOR_CENTER_REFRESH_TIME`); with it, ~44 ms.
 
@@ -1026,9 +1027,12 @@ def get_frame_display_times(
     - `vsync_rising_times`: optional, the rising edge of the frame signal for each vsync (falling
       edge). TaskControl raises the frame signal before drawing and calling `flip()`, and lowers it
       after `flip()` returns, so a frame can't be displayed before its rising edge +
-      `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC`. The falling edge can be delayed by a stall after
-      `flip()` returns (the frame is displayed on time). Used when diodeBoxFrameInterval > 1 to
-      place frames within a diode interval that contains dropped refreshes.
+      `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC`. The falling edge can come late, from a delay
+      somewhere between the buffer swap and the falling-edge write; the frame is displayed on
+      time (99.4% of 23,281 isolated late falling edges in box-1 blocks, TTL and NI-DAQ AI0:
+      npc_sessions experiments/phantom-flicker/late_return_check.log; most of these delays don't
+      reach PsychoPy's frameIntervals). Used when diodeBoxFrameInterval > 1 to place frames within
+      a diode interval that contains dropped refreshes.
     """
     # first, shift vsyncs forwards in time by the monitor latency, so we can more easily match up
     # diode flips and vsyncs
@@ -1394,8 +1398,8 @@ def get_frame_display_times(
                             long_refreshes[np.argmax(long_refreshes)] -= 1
                         if not np.all(long_refreshes > 0):
                             # more long vsync intervals than dropped refreshes (previously an
-                            # AssertionError): e.g. a falling edge delayed by a stall after flip()
-                            # gives a long-short pair of vsync intervals with no dropped refresh.
+                            # AssertionError): e.g. a late falling edge gives a long-short pair of
+                            # vsync intervals with no dropped refresh.
                             # Place frames with `place_frames_in_diode_interval` below.
                             long_idx = None
                     else:
@@ -1441,7 +1445,7 @@ def get_frame_display_times(
                     np.array(new_times)[1:] < lower_bound[1:]
                 ):
                     # placement from vsync falling-edge intervals put a frame before its frame
-                    # signal went high: the falling edges are delayed (stall after flip()), so
+                    # signal went high: the falling edges are late (frame displayed on time), so
                     # place frames using the rising edges as a lower bound instead
                     new_times = place_frames_in_diode_interval(
                         slot_times=evenly_spaced_times,
