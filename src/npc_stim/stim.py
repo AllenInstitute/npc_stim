@@ -145,6 +145,9 @@ def get_stim_block_matches(
     - the block's vsync count must equal the stim file's frame count exactly: a mismatch is
       reported, not absorbed
     - a block claimed by more than one stim file matches none of them
+    - a stim file that starts after the end of the sync recording is not matched (the sync
+      file doesn't cover it); a block cut off by the end of the sync recording is reported
+      as truncated
 
     Returns (block index -> stim path or None, unmatched stim path -> exception explaining
     why it wasn't matched). Stim files that can't be read, have no frames, or are from a
@@ -177,6 +180,15 @@ def get_stim_block_matches(
         if abs(stim_start_time_on_sync) >= 24 * 60 * 60:
             continue  # Skip files from different days
 
+        sync_duration = getattr(sync_data, "total_seconds", None)
+        if sync_duration is not None and stim_start_time_on_sync > sync_duration:
+            errors[stim_path] = IndexError(
+                f"{stim_path!r} starts {stim_start_time_on_sync - sync_duration:.1f} s after the "
+                f"sync recording ends ({sync_data.start_time} + {sync_duration:.1f} s): "
+                "the sync file doesn't cover this stim (wrong sync file, or sync stopped early)"
+            )
+            continue
+
         block_idx = int(np.argmin(abs(first_frame_per_block - stim_start_time_on_sync)))
         n_block_frames = int(n_frames_per_block[block_idx])
         if n_block_frames != n_stim_frames:
@@ -190,6 +202,14 @@ def get_stim_block_matches(
                 f"{n_block_frames} vsyncs, stim file has {n_stim_frames} frames "
                 f"(difference {n_stim_frames - n_block_frames}). "
                 f"Blocks with exactly {n_stim_frames} vsyncs: {exact_len_blocks}"
+                + (
+                    ". The block ends at the end of the sync recording: sync stopped before "
+                    "the stim ended (truncated)"
+                    if sync_duration is not None
+                    and n_block_frames < n_stim_frames
+                    and sync_duration - blocks[block_idx][-1] < 1.0
+                    else ""
+                )
             )
             continue
         claims.setdefault(block_idx, []).append(stim_path)

@@ -15,10 +15,11 @@ import npc_stim
 SYNC_START = datetime.datetime(2026, 1, 1, 10, 0, 0)
 
 
-def _sync(*blocks: tuple[float, int]) -> types.SimpleNamespace:
+def _sync(*blocks: tuple[float, int], total_seconds: float = 10_000) -> types.SimpleNamespace:
     """(first vsync time, n vsyncs) per block."""
     return types.SimpleNamespace(
         start_time=SYNC_START,
+        total_seconds=total_seconds,
         vsync_times_in_blocks=[t0 + np.arange(n) / 60 for t0, n in blocks],
     )
 
@@ -74,3 +75,23 @@ def test_frame_times_report_mismatch(tmp_path, monkeypatch) -> None:
     times = npc_stim.get_stim_frame_times(a, b, sync=sync, frame_time_type="vsync")
     assert isinstance(times[a], IndexError)
     assert len(times[b]) == 1200
+
+
+def test_stim_after_sync_recording_ends(tmp_path) -> None:
+    # e.g. wrong sync file in the session folder, or sync stopped before the stim started
+    a = _stim(tmp_path, "a", 10, 600)
+    late = _stim(tmp_path, "late", 5000, 600)
+    matches, errors = npc_stim.get_stim_block_matches(
+        [a, late], _sync((11, 600), (4000, 600), total_seconds=4100)
+    )
+    assert matches[0].name == "a.hdf5" and matches[1] is None
+    (err,) = errors.values()
+    assert "after the sync recording ends" in str(err)
+
+
+def test_truncated_block_is_reported(tmp_path) -> None:
+    a = _stim(tmp_path, "a", 10, 6000)
+    sync = _sync((11, 600), total_seconds=11 + 599 / 60 + 0.1)
+    matches, errors = npc_stim.get_stim_block_matches([a], sync)
+    assert matches == {0: None}
+    assert "truncated" in str(next(iter(errors.values())))
