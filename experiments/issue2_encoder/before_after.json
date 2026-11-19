@@ -1,0 +1,167 @@
+[
+ {
+  "file": "DynamicRouting1_668755_20230831_131418.hdf5",
+  "n": 217261,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 72.51924854237586,
+  "new_max": 72.51924854345127,
+  "new_p999": 68.63428880005209,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "OptoTagging_668755_20230831_124903.hdf5",
+  "n": 12636,
+  "old_nan": 9,
+  "new_nan": 15,
+  "old_max": 543.2468707853113,
+  "new_max": 53.310280923310906,
+  "new_p999": 52.878618729599886,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": -0.06784176155817302
+ },
+ {
+  "file": "OptoTagging_668755_20230831_142538.hdf5",
+  "n": 12713,
+  "old_nan": 7,
+  "new_nan": 15,
+  "old_max": 2864003117484.164,
+  "new_max": 66.90764002520801,
+  "new_p999": 64.88012270134809,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": 12.446204353931117
+ },
+ {
+  "file": "RFMapping_668755_20230831_123426.hdf5",
+  "n": 51337,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 61.29603150696494,
+  "new_max": 61.29603150696476,
+  "new_p999": 59.35355163526518,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "Spontaneous_668755_20230831_125306.hdf5",
+  "n": 36000,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 61.72769370069727,
+  "new_max": 61.727693700675786,
+  "new_p999": 59.56938273212069,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "DynamicRouting1_660023_20230809_124613.hdf5",
+  "n": 217081,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 51.583632148453034,
+  "new_max": 51.58363214846682,
+  "new_p999": 44.67703704909051,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "OptoTagging_660023_20230809_121550.hdf5",
+  "n": 12662,
+  "old_nan": 7,
+  "new_nan": 14,
+  "old_max": 3311.064856860379,
+  "new_max": 45.97202363022357,
+  "new_p999": 45.40071871684725,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": 1.1443350508561125e-18
+ },
+ {
+  "file": "OptoTagging_660023_20230809_135703.hdf5",
+  "n": 12683,
+  "old_nan": 7,
+  "new_nan": 15,
+  "old_max": 187532189196.07248,
+  "new_max": 40.792077305691336,
+  "new_p999": 39.49709072455828,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": 0.35987205066396066
+ },
+ {
+  "file": "RFMapping_660023_20230809_120108.hdf5",
+  "n": 51337,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 51.58363214856945,
+  "new_max": 51.58363214846682,
+  "new_p999": 48.99365898620071,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "Spontaneous_660023_20230809_121950.hdf5",
+  "n": 36000,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 53.094449826399796,
+  "new_max": 53.09444982645539,
+  "new_p999": 50.720739423238584,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "DynamicRouting1_662892_20230822_125029.hdf5",
+  "n": 216511,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 65.82848454033956,
+  "new_max": 65.82848454093048,
+  "new_p999": 61.511862603820276,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "OptoTagging_662892_20230822_122359.hdf5",
+  "n": 18980,
+  "old_nan": 15,
+  "new_nan": 26,
+  "old_max": 5389.086657385225,
+  "new_max": 56.97940956985457,
+  "new_p999": 55.90025408557702,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": 12.732034226134106
+ },
+ {
+  "file": "OptoTagging_662892_20230822_140126.hdf5",
+  "n": 18949,
+  "old_nan": 13,
+  "new_nan": 28,
+  "old_max": 5036435914766.95,
+  "new_max": 63.88600466923088,
+  "new_p999": 62.60828457584664,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": 4.662230267773233
+ },
+ {
+  "file": "RFMapping_662892_20230822_120918.hdf5",
+  "n": 51337,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 56.97940956975799,
+  "new_max": 56.97940956985457,
+  "new_p999": 54.605267504443965,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ },
+ {
+  "file": "Spontaneous_662892_20230822_122954.hdf5",
+  "n": 36000,
+  "old_nan": 1,
+  "new_nan": 1,
+  "old_max": 57.84273395710625,
+  "new_max": 57.84273395727661,
+  "new_p999": 55.252760795010495,
+  "unchanged_where_valid": false,
+  "old_filt_min_near_nan": null
+ }
+]

@@ -25,6 +25,16 @@ RUNNING_LOWPASS_FILTER_HZ = 4
 """Frequency for filtering running speed - filtered data stored in NWB `processing`, unfiltered
 in `acquisition`"""
 
+MAX_MOUSE_SPRINT_SPEED_CM_S = 334
+"""Fastest recorded maximal sprint speed of any individual house mouse (wild-caught Mus
+domesticus, forced sprint over 1 m on a racetrack: range 2.38-3.34 m/s; laboratory Hsd:ICR mice
+0.89-1.68 m/s). Garland et al. 1995, Physiol Behav 58(5):869-876,
+https://doi.org/10.1016/0031-9384(95)00148-c"""
+
+RUNNING_SPEED_MAX_CM_S = 1.3 * MAX_MOUSE_SPRINT_SPEED_CM_S
+"""Samples with |speed| above this (fastest recorded mouse + 30%) are physically implausible and
+are set to NaN (in cm/s, regardless of `RUNNING_SPEED_UNITS`)."""
+
 
 def get_running_speed_from_stim_files(
     *stim_path: npc_io.PathLike,
@@ -136,34 +146,114 @@ def get_running_speed_from_hdf5(
         )
     if "frameRate" in d:
         assert d["frameRate"][()] == RUNNING_SAMPLE_RATE
-    wheel_revolutions = d["rotaryEncoderCount"][:] / d["rotaryEncoderCountsPerRev"][()]
-    if not any(wheel_revolutions):
+    count = d["rotaryEncoderCount"][:]
+    if not np.any(np.nan_to_num(count)):
         logger.warning(f"No wheel revolutions found in {stim_path}")
         return np.array([])
-    wheel_radius_cm = d["wheelRadius"][()]
-    if RUNNING_SPEED_UNITS == "m/s":
-        running_disk_radius = wheel_radius_cm / 100
-    elif RUNNING_SPEED_UNITS == "cm/s":
-        running_disk_radius = wheel_radius_cm
-    else:
-        raise ValueError(f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}")
-    speed = np.diff(
-        wheel_revolutions * 2 * np.pi * running_disk_radius * RUNNING_SAMPLE_RATE
+    index = d["rotaryEncoderIndex"][:] if "rotaryEncoderIndex" in d else None
+    if index is None:
+        logger.warning(
+            f"No rotaryEncoderIndex in {stim_path}: skipped encoder reads can only be "
+            "detected by speed threshold"
+        )
+    speed = get_running_speed_from_encoder_count(
+        count,
+        counts_per_rev=d["rotaryEncoderCountsPerRev"][()],
+        wheel_radius_cm=d["wheelRadius"][()],
+        index=index,
     )
-    # we lost one sample due to diff: pad with nan to keep same number of samples
-    return np.concatenate([[np.nan], speed])
+    if (n := np.isnan(speed[1:]).sum()) > 0:
+        logger.info(f"{n} running speed samples are NaN in {stim_path}")
+    return speed
 
 
-def lowpass_filter(running_speed: npt.NDArray) -> npt.NDArray:
+def get_running_speed_from_encoder_count(
+    count: npt.ArrayLike,
+    counts_per_rev: float,
+    wheel_radius_cm: float,
+    index: npt.ArrayLike | None = None,
+) -> npt.NDArray[np.floating]:
+    """Running speed (`RUNNING_SPEED_UNITS`) from cumulative rotary encoder counts, one read per
+    frame. Output has the same length as `count`, with NaN as the first sample (lost to diff).
+
+    Unreliable samples are set to NaN:
+    - missing reads (NaN count)
+    - skipped encoder reads, where `rotaryEncoderIndex` does not increment by exactly 1: the
+      count steps by a non-physical amount at the skip, and the following read is also
+      contaminated (elevated speed), so both samples are masked
+    - |speed| > `RUNNING_SPEED_MAX_CM_S` (e.g. garbage reads of ~1e13 counts)
+
+    See https://github.com/AllenInstitute/npc_stim/issues/2
+
+    >>> get_running_speed_from_encoder_count([0, 10, 20, 30], 8192, wheel_radius_cm=4.69)
+    array([       nan, 2.15831097, 2.15831097, 2.15831097])
+
+    Skipped read (index increments by 3): the step and the following sample are masked:
+    >>> count, index = [0, 10, 20, 9000, 9010, 9020], [0, 1, 2, 5, 6, 7]
+    >>> get_running_speed_from_encoder_count(count, 8192, 4.69, index=index)
+    array([       nan, 2.15831097, 2.15831097,        nan,        nan, 2.15831097])
+    """
+    count = np.asarray(count, dtype=np.float64)
+    speed_cm_s = np.concatenate(
+        [
+            [np.nan],
+            np.diff(count / counts_per_rev)
+            * 2
+            * np.pi
+            * wheel_radius_cm
+            * RUNNING_SAMPLE_RATE,
+        ]
+    )
+    bad = np.abs(np.nan_to_num(speed_cm_s, nan=0)) > RUNNING_SPEED_MAX_CM_S
+    if index is not None:
+        index = np.asarray(index, dtype=np.float64)
+        if index.shape != count.shape:
+            raise ValueError(
+                f"rotaryEncoderIndex shape {index.shape} does not match "
+                f"rotaryEncoderCount shape {count.shape}"
+            )
+        skipped = np.concatenate([[False], np.diff(index) != 1])  # NaN != 1 is True
+        bad |= skipped
+        bad[1:] |= skipped[:-1]  # read following a skip is also contaminated
+    speed_cm_s[bad] = np.nan
+    if RUNNING_SPEED_UNITS == "m/s":
+        return speed_cm_s / 100
+    elif RUNNING_SPEED_UNITS == "cm/s":
+        return speed_cm_s
+    raise ValueError(f"Unexpected units for running speed: {RUNNING_SPEED_UNITS}")
+
+
+def lowpass_filter(running_speed: npt.NDArray, restore_nan: bool = True) -> npt.NDArray:
     """
     Careful not to filter discontiguous blocks of samples.
     See
     https://github.com/AllenInstitute/AllenSDK/blob/36e784d007aed079e3cad2b255ca83cdbbeb1330/allensdk/brain_observatory/behavior/data_objects/running_speed/running_processing.py
+
+    NaN samples (missed or glitched encoder reads) are linearly interpolated before filtering
+    (leading/trailing NaNs take the nearest valid value) rather than zero-filled, so they don't
+    create artificial dips. If `restore_nan`, they are set back to NaN in the output.
+    See https://github.com/AllenInstitute/npc_stim/issues/4
+
+    >>> x = np.full(100, 20.0); x[50] = np.nan
+    >>> y = lowpass_filter(x)
+    >>> bool(np.isnan(y[50])), bool(np.allclose(np.delete(y, 50), 20))
+    (True, True)
     """
+    running_speed = np.asarray(running_speed, dtype=np.float64)
+    is_nan = np.isnan(running_speed)
+    if is_nan.all():
+        return running_speed.copy()
+    filled = running_speed.copy()
+    if is_nan.any():
+        x = np.arange(len(running_speed))
+        filled[is_nan] = np.interp(x[is_nan], x[~is_nan], running_speed[~is_nan])
     b, a = scipy.signal.butter(
         3, Wn=RUNNING_LOWPASS_FILTER_HZ, fs=RUNNING_SAMPLE_RATE, btype="lowpass"
     )
-    return scipy.signal.filtfilt(b, a, np.nan_to_num(running_speed))
+    filtered = scipy.signal.filtfilt(b, a, filled)
+    if restore_nan:
+        filtered[is_nan] = np.nan
+    return filtered
 
 
 if __name__ == "__main__":
