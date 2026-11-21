@@ -480,10 +480,15 @@ def get_display_times(
                 ),
             )
 
-        # keep flips after first vsync + an empirically determined min latency
-        # between vsync and screen update
-        falling = falling[falling > (vsyncs[0] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
-        rising = rising[rising > (vsyncs[0] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+        # keep flips after the start of the first frame + an empirically determined min latency
+        # between vsync and screen update. The first frame starts at its vsync rising edge: its
+        # falling edge can be late, with the first flip < MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+        # after it (666986_2023-08-16 RFMapping: falling edge 12 ms late, flip 13 ms after it)
+        first_frame_start = get_first_frame_start(sync_data, vsyncs)
+        falling = falling[
+            falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
+        ]
+        rising = rising[rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
 
         # keep flips only up to a certain time after the last vsync
         falling = falling[falling < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
@@ -887,6 +892,24 @@ def get_vsync_rising_edges(
     rising = sync_data.get_rising_edges("vsync_stim", units="seconds")
     idx = np.searchsorted(rising, vsync_falling_edges) - 1
     return np.where(idx >= 0, rising[np.clip(idx, 0, None)], -np.inf)
+
+
+def get_first_frame_start(
+    sync_data: npc_sync.SyncDataset, vsync_falling_edges: npt.NDArray[np.float64]
+) -> float:
+    """The vsync rising edge of the first frame in a block, or its falling edge if there's no
+    rising edge within `MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC` before it (no rising edge on the
+    line, or the nearest one belongs to an earlier pulse/block)."""
+    first_fall = float(vsync_falling_edges[0])
+    first_rise = float(get_vsync_rising_edges(sync_data, vsync_falling_edges[:1])[0])
+    if not (first_fall - MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC < first_rise <= first_fall):
+        return first_fall
+    all_falling = sync_data.get_falling_edges("vsync_stim", units="seconds")
+    previous_falling = all_falling[all_falling < first_fall]
+    if len(previous_falling) and previous_falling[-1] >= first_rise:
+        # the rising edge belongs to an earlier pulse
+        return first_fall
+    return first_rise
 
 
 def place_frames_in_diode_interval(

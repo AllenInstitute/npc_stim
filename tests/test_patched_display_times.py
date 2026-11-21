@@ -118,9 +118,16 @@ R = 1 / 60
 LAT_R, LAT_F = 0.020, 0.024
 
 
-def _box1_files(tmp: pathlib.Path, phantom_pairs: dict[int, list[int]], name: str):
+def _box1_files(
+    tmp: pathlib.Path,
+    phantom_pairs: dict[int, list[int]],
+    name: str,
+    first_fall_delay: float = 0.0,
+    vsync_pulse_width: float = 0.015,
+):
     """Box-1 block: 4000 frames with held frames; phantom flicker = one-refresh flashes of the
-    other buffer during holds (TTL: first edge 3 ms late, restoring edge on time)."""
+    other buffer during holds (TTL: first edge 3 ms late, restoring edge on time).
+    `first_fall_delay`: the first vsync's falling edge is this late (its rising edge on time)."""
     n = 4000
     holds = {700: 3, 1500: 2, 1520: 4, 2400: 11, 3000: 3, 3300: 3, 3600: 2}
     n_ref = np.ones(n - 1, int)
@@ -131,8 +138,8 @@ def _box1_files(tmp: pathlib.Path, phantom_pairs: dict[int, list[int]], name: st
     fall = display + 0.0002 + rng.normal(0, 2e-5, n)
     fi = np.diff(fall)
     edges = []
-    for t in fall:
-        edges += [(t - 0.015, 2, 1), (t, 2, 0)]
+    for i, t in enumerate(fall):
+        edges += [(t - vsync_pulse_width, 2, 1), (t + (first_fall_delay if i == 0 else 0), 2, 0)]
     pol = 1
     for k in range(n):
         edges.append((display[k] + (LAT_R if pol else LAT_F), 4, pol))
@@ -228,3 +235,21 @@ def test_clean_block_is_unchanged_by_the_patch(tmp_path) -> None:
     (b,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
     assert a.source == b.source == "photodiode"
     assert np.array_equal(a.display_times, b.display_times)
+
+
+def test_late_first_vsync_falling_edge_keeps_first_flip(tmp_path) -> None:
+    """666986_2023-08-16 RFMapping: the first vsync's falling edge was 12 ms late and the first
+    diode flip came 13 ms after it (normal latency from the rising edge). Flips were filtered from
+    the first falling edge + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC, so the first flip was dropped,
+    every frame looked one frame off and the block had no display times."""
+    # first flip at display + LAT_R ~ falling edge + 20 ms: make it 8 ms after the falling edge
+    sync, stim, _, display = _box1_files(
+        tmp_path, {}, "late_first_fall", first_fall_delay=0.012, vsync_pulse_width=0.002
+    )
+    ref_sync, ref_stim, *_ = _box1_files(tmp_path, {}, "ref", vsync_pulse_width=0.002)
+    (ref,) = npc_stim.get_display_times(npc_sync.SyncDataset(ref_sync), [ref_stim])
+    assert ref.source == "photodiode", ref.reason
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync), [stim])
+    assert block.source == "photodiode", block.reason
+    assert len(block.display_times) == len(display)
+    assert np.max(np.abs(block.display_times - ref.display_times)) < 2e-5
