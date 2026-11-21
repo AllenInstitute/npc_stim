@@ -488,7 +488,9 @@ def get_display_times(
         falling = falling[
             falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
         ]
-        rising = rising[rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+        rising = rising[
+            rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
+        ]
 
         # keep flips only up to a certain time after the last vsync
         falling = falling[falling < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
@@ -902,7 +904,9 @@ def get_first_frame_start(
     line, or the nearest one belongs to an earlier pulse/block)."""
     first_fall = float(vsync_falling_edges[0])
     first_rise = float(get_vsync_rising_edges(sync_data, vsync_falling_edges[:1])[0])
-    if not (first_fall - MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC < first_rise <= first_fall):
+    if not (
+        first_fall - MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC < first_rise <= first_fall
+    ):
         return first_fall
     all_falling = sync_data.get_falling_edges("vsync_stim", units="seconds")
     previous_falling = all_falling[all_falling < first_fall]
