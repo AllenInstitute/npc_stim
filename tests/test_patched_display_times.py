@@ -109,6 +109,11 @@ def test_patch_without_stim_block_rejects_only_that_block(tmp_path) -> None:
     patch = P.build_sync_patch(raw, [], builder="test")  # vsync can't be reconstructed
     (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
     assert block.source == "unavailable" and "couldn't reconstruct" in block.reason
+    # no fallback where the vsyncs themselves are unknown
+    (block,) = npc_stim.get_display_times(
+        npc_sync.SyncDataset(sync, patch=patch), [stim], fallback="constant_lag"
+    )
+    assert block.source == "unavailable" and block.display_times is None
 
 
 # phantom flicker (diodeBoxFrameInterval 1): the SyncPatch removes it, npc_stim consumes the
@@ -124,10 +129,16 @@ def _box1_files(
     name: str,
     first_fall_delay: float = 0.0,
     vsync_pulse_width: float = 0.015,
+    pre_block_diode_edges: tuple[float, ...] = (),
+    late_vsync_frames: tuple[int, ...] = (),
 ):
     """Box-1 block: 4000 frames with held frames; phantom flicker = one-refresh flashes of the
     other buffer during holds (TTL: first edge 3 ms late, restoring edge on time).
-    `first_fall_delay`: the first vsync's falling edge is this late (its rising edge on time)."""
+    `first_fall_delay`: the first vsync's falling edge is this late (its rising edge on time).
+    `pre_block_diode_edges`: diode edges (on, off, ...) at these times after the first vsync's
+    rising edge, before the first frame's flip (flicker).
+    `late_vsync_frames`: these frames' vsync pulses are 2 ms wide and 9 ms late, so their diode
+    flip is < MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC after their rising edge."""
     n = 4000
     holds = {700: 3, 1500: 2, 1520: 4, 2400: 11, 3000: 3, 3300: 3, 3600: 2}
     n_ref = np.ones(n - 1, int)
@@ -139,7 +150,12 @@ def _box1_files(
     fi = np.diff(fall)
     edges = []
     for i, t in enumerate(fall):
+        if i in late_vsync_frames:
+            edges += [(t + 0.007, 2, 1), (t + 0.009, 2, 0)]
+            continue
         edges += [(t - vsync_pulse_width, 2, 1), (t + (first_fall_delay if i == 0 else 0), 2, 0)]
+    for j, dt in enumerate(pre_block_diode_edges):
+        edges.append((fall[0] - vsync_pulse_width + dt, 4, 1 - j % 2))
     pol = 1
     for k in range(n):
         edges.append((display[k] + (LAT_R if pol else LAT_F), 4, pol))
@@ -223,6 +239,15 @@ def test_patch_rejected_block_is_unavailable(tmp_path) -> None:
     patch.removed = {}
     (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync, patch=patch), [stim])
     assert block.source == "unavailable" and "SyncPatch rejected" in block.reason
+    # the constant-lag fallback covers blocks the patch rejected
+    (block,) = npc_stim.get_display_times(
+        npc_sync.SyncDataset(sync, patch=patch), [stim], fallback="constant_lag"
+    )
+    assert block.source == "constant_lag" and "SyncPatch rejected" in block.reason
+    assert np.array_equal(
+        block.display_times, block.vsync_times + npc_stim.CONSTANT_MONITOR_LAG
+    )
+    assert block.n_constant_lag_frames == len(block.vsync_times)
 
 
 @needs_flicker_patch
@@ -253,3 +278,65 @@ def test_late_first_vsync_falling_edge_keeps_first_flip(tmp_path) -> None:
     assert block.source == "photodiode", block.reason
     assert len(block.display_times) == len(display)
     assert np.max(np.abs(block.display_times - ref.display_times)) < 2e-5
+    # the falling-edge window is tried first; the rising-edge retry is recorded
+    assert ref.notes is None
+    assert block.notes is not None and "rising edge" in block.notes
+
+
+def test_flicker_before_first_flip_is_outside_falling_edge_window(tmp_path) -> None:
+    """670180_2023-07-27 task (regression in npc_stim 0.1.27): diode flicker 16 and 18 ms after
+    the first vsync's rising edge (~0 and +2 ms from its falling edge), first real flip later.
+    A window from the rising edge + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC admits the flicker and
+    every frame is off by one; the falling-edge window (npc_stim <= 0.1.26) excludes it."""
+    sync, stim, _, display = _box1_files(
+        tmp_path, {}, "pre_flicker", pre_block_diode_edges=(0.016, 0.018)
+    )
+    ref_sync, ref_stim, *_ = _box1_files(tmp_path, {}, "ref")
+    (ref,) = npc_stim.get_display_times(npc_sync.SyncDataset(ref_sync), [ref_stim])
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync), [stim])
+    assert block.source == "photodiode", block.reason
+    assert block.notes is None
+    assert np.array_equal(block.display_times, ref.display_times)
+
+
+def test_one_early_frame_gets_constant_lag(tmp_path) -> None:
+    """714748_2024-06-24 / 733891_2024-09-17 (after a dropped frame, a short, late vsync pulse)
+    and 742903_2024-10-24 (the invented last frame): one frame's diode flip is < 15 ms after its
+    vsync rising edge. The block keeps its photodiode times; that frame gets vsync + constant
+    lag and is flagged (npc_stim <= 0.1.27 rejected the whole block)."""
+    k = 2000
+    sync, stim, _, display = _box1_files(
+        tmp_path, {}, "early1", vsync_pulse_width=0.002, late_vsync_frames=(k,)
+    )
+    ref_sync, ref_stim, *_ = _box1_files(tmp_path, {}, "ref", vsync_pulse_width=0.002)
+    (ref,) = npc_stim.get_display_times(npc_sync.SyncDataset(ref_sync), [ref_stim])
+    # the late vsync pulse isn't in the stim file's frame intervals: match explicitly
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync), {0: stim})
+    assert block.source == "photodiode", block.reason
+    assert block.frame_source is not None
+    assert np.flatnonzero(block.frame_source).tolist() == [k]
+    assert block.frame_source[k] == 2 and block.n_constant_lag_frames == 1
+    assert block.notes is not None and str(k) in block.notes
+    assert np.isclose(
+        block.display_times[k],
+        block.vsync_times[k] + npc_stim.CONSTANT_MONITOR_LAG,
+        rtol=0,
+        atol=1e-9,
+    )
+    others = np.arange(len(display)) != k
+    assert np.max(np.abs(block.display_times[others] - ref.display_times[others])) < 2e-5
+    assert ref.frame_source is None and ref.notes is None
+
+
+def test_many_early_frames_reject_the_block(tmp_path) -> None:
+    frames = (500, 1000, 2000, 2500)  # > MAX_EARLY_FRAMES
+    assert len(frames) > npc_stim.display_times.MAX_EARLY_FRAMES
+    sync, stim, *_ = _box1_files(
+        tmp_path, {}, "early4", vsync_pulse_width=0.002, late_vsync_frames=frames
+    )
+    (block,) = npc_stim.get_display_times(npc_sync.SyncDataset(sync), {0: stim})
+    assert block.source == "unavailable" and "misassigned" in block.reason
+    (block,) = npc_stim.get_display_times(
+        npc_sync.SyncDataset(sync), {0: stim}, fallback="constant_lag"
+    )
+    assert block.source == "constant_lag" and "misassigned" in block.reason

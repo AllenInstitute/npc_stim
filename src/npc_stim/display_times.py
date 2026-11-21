@@ -22,7 +22,8 @@ Photodiode phantom flicker (extra edges while a frame is held, diodeBoxFrameInte
 comparator glitches are removed by the sync file's `npc_sync.SyncPatch`, which also records per
 block whether every diode edge was explained (`SyncPatch.diode_blocks`). For a block the patch
 'cleaned', the estimator consumes the line as patched and does not remove edges itself (no
-anomalous-interval removal); a block the patch 'rejected' gets no display times. Other blocks
+anomalous-interval removal); a block the patch 'rejected' gets no photodiode display times
+(only the constant-lag fallback, if requested). Other blocks
 (no patch, box interval > 1, not checked) keep the estimator's own handling.
 """
 
@@ -113,9 +114,14 @@ class BlockDisplayTimes:
     reason: str | None = None
     """Why the photodiode was not used (None if it was)."""
     frame_source: npt.NDArray[np.int8] | None = None
-    """Per frame: 0 (measured) or 1 (interpolated: the frame's vsync, or the diode edge its
+    """Per frame: 0 (measured), 1 (interpolated: the frame's vsync, or the diode edge its
     display time comes from, was reconstructed by the sync file's `SyncPatch` inside a
-    replayed interval). None if the sync file has no patch (all measured)."""
+    replayed interval) or 2 (constant lag in a photodiode block: the frame's diode flip was
+    misassigned, see `MAX_EARLY_FRAMES`, so its display time is vsync +
+    `CONSTANT_MONITOR_LAG`). None if every frame is 0 (no patch and no constant-lag frames)."""
+    notes: str | None = None
+    """Diagnostics for a photodiode block: frames given constant lag (`frame_source` 2), or the
+    diode-flip window starting at the first vsync's rising edge."""
 
     @property
     def is_photodiode(self) -> bool:
@@ -124,6 +130,14 @@ class BlockDisplayTimes:
     @property
     def n_interpolated(self) -> int:
         return 0 if self.frame_source is None else int(np.sum(self.frame_source == 1))
+
+    @property
+    def n_constant_lag_frames(self) -> int:
+        """Frames whose display time is vsync + `CONSTANT_MONITOR_LAG`: all of them for
+        `source='constant_lag'`, else those with `frame_source` 2."""
+        if self.source == "constant_lag":
+            return len(self.vsync_times)
+        return 0 if self.frame_source is None else int(np.sum(self.frame_source == 2))
 
 
 def _is_patched_for_display_times(sync_data: npc_sync.SyncDataset) -> bool:
@@ -361,9 +375,15 @@ def get_display_times(
       `npc_stim.get_stim_block_to_path`), or an existing mapping of block index to stim path.
       Blocks without a stim file get no display times (the vsync count and diode-box
       interval can't be checked).
-    - `fallback='constant_lag'`: blocks where the photodiode can't be used get vsync +
-      `CONSTANT_MONITOR_LAG`, with `source='constant_lag'`. Default: no display times
-      (`source='unavailable'`).
+    - `fallback='constant_lag'`: blocks where the photodiode can't be used (including blocks
+      whose photodiode edges the `SyncPatch` rejected) get vsync + `CONSTANT_MONITOR_LAG`, with
+      `source='constant_lag'`. Default: no display times (`source='unavailable'`). Blocks
+      overlapping a span the patch couldn't reconstruct never get a fallback.
+    - a photodiode block with up to `MAX_EARLY_FRAMES` frames whose diode flip comes too soon
+      after their vsync rising edge keeps its photodiode times, with constant lag for those
+      frames (`frame_source` 2, listed in `BlockDisplayTimes.notes`)
+    - diode flips are kept from the first vsync's falling edge; if the estimate fails, it's
+      retried from the first vsync's rising edge (recorded in `notes`)
     - `raise_on_error`: re-raise errors from the estimator instead of recording the block as
       not using the photodiode.
 
@@ -425,40 +445,22 @@ def get_display_times(
     ):
         stim_path = block_to_stim_path.get(block_idx)
 
-        diode_record = _diode_block_record(sync_data, vsyncs)
-        if diode_record is not None and diode_record.status == "rejected":
-            msg = f"SyncPatch rejected the block's photodiode edges: {diode_record.reason}"
-            logger.warning(f"{sync_data} block {block_idx}: {msg}")
-            results.append(
-                BlockDisplayTimes(
-                    block_index=block_idx,
-                    stim_path=stim_path,
-                    vsync_times=vsyncs,
-                    display_times=None,
-                    source="unavailable",
-                    reason=msg,
-                )
-            )
-            continue
-        diode_cleaned = diode_record is not None and diode_record.status == "cleaned"
-
-        if patched and any(
+        # a block overlapping a span where the SyncPatch couldn't reconstruct vsync/photodiode
+        # gets no display times, even with a fallback: its vsyncs can't be trusted either
+        overlaps_unknown = patched and any(
             a <= vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC and z >= vsyncs[0]
             for a, z in unknown
-        ):
-            msg = "block overlaps a replayed sync interval that the SyncPatch couldn't reconstruct for vsync/photodiode"
-            logger.warning(f"{sync_data} block {block_idx}: {msg}")
-            results.append(
-                BlockDisplayTimes(
-                    block_index=block_idx,
-                    stim_path=stim_path,
-                    vsync_times=vsyncs,
-                    display_times=None,
-                    source="unavailable",
-                    reason=msg,
-                )
+        )
+
+        def unavailable(reason: str) -> BlockDisplayTimes:
+            return BlockDisplayTimes(
+                block_index=block_idx,
+                stim_path=stim_path,
+                vsync_times=vsyncs,
+                display_times=None,
+                source="unavailable",
+                reason=reason,
             )
-            continue
 
         def not_using_diode(
             reason: str, vsyncs_per_diode_flip: int | None
@@ -480,36 +482,29 @@ def get_display_times(
                 ),
             )
 
-        # keep flips after the start of the first frame + an empirically determined min latency
-        # between vsync and screen update. The first frame starts at its vsync rising edge: its
-        # falling edge can be late, with the first flip < MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
-        # after it (666986_2023-08-16 RFMapping: falling edge 12 ms late, flip 13 ms after it)
-        first_frame_start = get_first_frame_start(sync_data, vsyncs)
-        falling = falling[
-            falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
-        ]
-        rising = rising[
-            rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
-        ]
+        diode_record = _diode_block_record(sync_data, vsyncs)
+        if diode_record is not None and diode_record.status == "rejected":
+            msg = f"SyncPatch rejected the block's photodiode edges: {diode_record.reason}"
+            logger.warning(f"{sync_data} block {block_idx}: {msg}")
+            # the vsyncs are fine (unless the block also overlaps an unknown span): the
+            # fallback applies, as for any other block whose photodiode can't be used
+            results.append(
+                unavailable(msg) if overlaps_unknown else not_using_diode(msg, None)
+            )
+            continue
+        diode_cleaned = diode_record is not None and diode_record.status == "cleaned"
 
-        # keep flips only up to a certain time after the last vsync
-        falling = falling[falling < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
-        rising = rising[rising < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+        if overlaps_unknown:
+            msg = "block overlaps a replayed sync interval that the SyncPatch couldn't reconstruct for vsync/photodiode"
+            logger.warning(f"{sync_data} block {block_idx}: {msg}")
+            results.append(unavailable(msg))
+            continue
 
         if stim_path is None:
             msg = "no stim file matched to block: number of vsyncs and diode-box interval can't be checked"
             logger.warning(f"{sync_data} block {block_idx}: {msg}")
             results.append(not_using_diode(msg, None))
             continue
-
-        if not len(rising) or not len(falling):
-            # previously an IndexError that failed the whole session (DRpilot_796848_20250715)
-            msg = f"no diode {'rising' if not len(rising) else 'falling'} edges between the block's first vsync and {MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after its last"
-            logger.warning(f"{sync_data} block {block_idx}: {msg}")
-            results.append(not_using_diode(msg, None))
-            continue
-
-        is_first_frame_on = rising[0] < falling[0]  # may be updated below
 
         stim_data = npc_stim.stim.get_h5_stim_data(stim_path)
         try:
@@ -518,140 +513,87 @@ def get_display_times(
         finally:
             stim_data.close()
 
-        if vsyncs_per_diode_flip == 1 and expected_vsyncs != len(vsyncs):
-            msg = f"{len(vsyncs)} vsyncs, expected {expected_vsyncs} from stim file"
-            logger.warning(f"Block {block_idx} has {msg}: Skipping")
-            results.append(not_using_diode(msg, vsyncs_per_diode_flip))
-            continue
-
-        def concat_flips(rising, falling):
-            """Concatenate the rising and falling edges into a single array."""
-            return np.sort(np.concatenate((rising, falling)))
-
-        def split_flips(concat_flips, is_first_frame_on):
-            """Split the concatenated flips into rising and falling edges."""
-            on = concat_flips[::2]
-            off = concat_flips[1::2]
-            if is_first_frame_on:
-                return (on, off)
-            else:
-                return (off, on)
-
-        flips = concat_flips(rising, falling)
-        # a block whose diode edges the SyncPatch cleaned is used as patched: the patch is the
-        # one place where edges are removed (phantom flicker, glitches), so don't remove more
-        while not diode_cleaned and any(
-            anomalous_interval_indices(flips, vsyncs_per_diode_flip)
-        ):
-
-            indices = anomalous_interval_indices(flips, vsyncs_per_diode_flip)
-            # just delete one interval then check again:
-            logger.warning(
-                f"Removing anomalous short diode interval in block {block_idx}"
-            )
-            flips = np.delete(flips, slice(indices[0], indices[0] + 2))
-            if 0 in indices:
-                is_first_frame_on = not is_first_frame_on
-
-        # one flip per `vsyncs_per_diode_flip` frames. For N > 1 this check didn't exist: a block
-        # whose flips were mostly removed above would get almost all of its display times invented
-        # at the end of the block (`n_missing` in `get_frame_display_times`). Across 787 box-3
-        # blocks the excess after removal is within +/-1 of ceil(n_vsyncs / 3).
-        expected_flips = int(np.ceil(len(vsyncs) / vsyncs_per_diode_flip))
-        if np.abs(len(flips) - expected_flips) > 5:
-            msg = (
-                f"{len(flips)} diode flips (after basic filtering), but {len(vsyncs)} vsyncs"
-                + (
-                    f" (expected {expected_flips} flips with diodeBoxFrameInterval={vsyncs_per_diode_flip})"
-                    if vsyncs_per_diode_flip > 1
-                    else ""
-                )
-            )
-            logger.warning(f"Block {block_idx} has {msg}: Skipping")
-            results.append(not_using_diode(msg, vsyncs_per_diode_flip))
-            continue
-
-        rising, falling = split_flips(flips, is_first_frame_on)
-
         stim_id = f"{stim_path.parent.name}_{block_idx}_{stim_path.stem}"
+        vsync_rising_edges = get_vsync_rising_edges(sync_data, vsyncs)
 
-        try:
-            times = get_frame_display_times(
-                vsync_times=vsyncs,
-                on_flip_times=rising,
-                off_flip_times=falling,
-                vsyncs_per_flip=vsyncs_per_diode_flip,
-                adjust_dropped_frames=True,
-                check_lengths=False,
-                check_vsyncs=True,
+        # Diode flips are kept from the start of the first frame + an empirically determined
+        # min latency between vsync and screen update. The first frame starts at its vsync
+        # falling edge (as in npc_stim <= 0.1.26); if the estimate fails, it's retried from the
+        # first frame's vsync rising edge: a late first falling edge can be followed by the
+        # first flip < MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC later (666986_2023-08-16 RFMapping:
+        # falling edge 12 ms late, flip 13 ms after it). The falling edge comes first because
+        # the rising-edge window admits diode flicker before the first frame
+        # (670180_2023-07-27 task: edges 16 and 18 ms after the rising edge, first flip at 41 ms)
+        first_frame_rise = get_first_frame_start(sync_data, vsyncs)
+        can_retry = first_frame_rise < vsyncs[0]
+        first = _estimate_block_display_times(
+            sync_data_name=str(sync_data),
+            block_idx=block_idx,
+            stim_id=stim_id,
+            vsyncs=vsyncs,
+            vsync_rising_edges=vsync_rising_edges,
+            rising=rising,
+            falling=falling,
+            first_frame_start=float(vsyncs[0]),
+            vsyncs_per_diode_flip=vsyncs_per_diode_flip,
+            expected_vsyncs=expected_vsyncs,
+            diode_cleaned=diode_cleaned,
+            raise_on_error=raise_on_error and not can_retry,
+        )
+        estimate, notes = first, None
+        if first.reason is not None and first.retryable and can_retry:
+            second = _estimate_block_display_times(
+                sync_data_name=str(sync_data),
+                block_idx=block_idx,
                 stim_id=stim_id,
-                vsync_rising_times=get_vsync_rising_edges(sync_data, vsyncs),
+                vsyncs=vsyncs,
+                vsync_rising_edges=vsync_rising_edges,
+                rising=rising,
+                falling=falling,
+                first_frame_start=first_frame_rise,
+                vsyncs_per_diode_flip=vsyncs_per_diode_flip,
+                expected_vsyncs=expected_vsyncs,
+                diode_cleaned=diode_cleaned,
+                raise_on_error=raise_on_error,
             )
-        except (AssertionError, IndexError) as exc:
-            if raise_on_error:
-                raise
-            logger.exception(
-                f"Failed to get correct frame display times for {stim_id} block {block_idx}."
-                + (
-                    "Using vsync times + constant lag"
-                    if fallback == "constant_lag"
-                    else "No frame display times will be available"
+            if second.reason is None:
+                estimate = second
+                notes = (
+                    "diode flips kept from the first vsync's rising edge (not its falling "
+                    f"edge, {(vsyncs[0] - first_frame_rise) * 1e3:.1f} ms later): "
+                    f"from the falling edge, {first.reason}"
                 )
-            )
+                logger.warning(f"{stim_id}: Block {block_idx}: {notes}")
+            else:
+                estimate = dataclasses.replace(
+                    first,
+                    reason=f"{first.reason} (also with diode flips kept from the first vsync's "
+                    f"rising edge: {second.reason})",
+                )
+
+        if estimate.reason is not None or estimate.times is None:
+            logger.error(f"{stim_id}: Block {block_idx}: {estimate.reason}")
             results.append(
-                not_using_diode(f"estimator failed: {exc!r}", vsyncs_per_diode_flip)
+                not_using_diode(
+                    str(estimate.reason), estimate.diode_box_frame_interval
+                )
             )
             continue
 
-        if vsyncs_per_diode_flip == 1:
-            while len(times) < len(vsyncs):
-                if len(vsyncs) - len(times) > 3:
-                    raise AssertionError(
-                        f"{stim_id}: Block {block_idx} has {len(times)} frame display times, "
-                        f"but {len(vsyncs)} vsyncs: too many missing frames"
-                    )
-                times = add_missing_diode_flips_for_truncated_sync(times, vsyncs)
-
-            if (len(times) == len(vsyncs) + 1) and times[-1] > vsyncs[-1] + (
-                times[:-1] - vsyncs
-            ).mean():
-                # special case where we have an extra flip at the end, which doesn't correspond to a vsync
-                # - can happen if the last frame's sync square is high and the screen then returns to black
-                times = times[:-1]
-            if len(times) - len(vsyncs) < 5:
-                # if we have a few more frames than vsyncs, we can assume these are just extra frames
-                # at the end of the block caused by spontaneous flicker, so we remove them
-                times = times[: len(vsyncs)]
-            if len(times) != len(vsyncs):
-                msg = f"{len(times)} frame display times, but {len(vsyncs)} vsyncs"
-                logger.error(f"{stim_id}: Block {block_idx} has {msg}")
-                results.append(not_using_diode(msg, vsyncs_per_diode_flip))
-                continue
-
-        if len(times) == len(vsyncs):
-            times, msg = correct_whole_block_frame_offset(times, vsyncs)
-            if msg is None:
-                # replaces the disabled `display >= vsync` assert: vsync falling edges can be
-                # late (a delay between the buffer swap and the falling-edge write), but a frame
-                # can't be displayed before its frame signal went high (+ the minimum
-                # vsync-to-flip latency)
-                n_early = int(
-                    np.sum(
-                        times
-                        < get_vsync_rising_edges(sync_data, vsyncs)
-                        + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
-                    )
-                )
-                if n_early:
-                    msg = (
-                        f"{n_early} frame(s) have a diode flip less than "
-                        f"{MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after their vsync rising edge "
-                        "(frame signal raised before draw + flip): flips are misassigned"
-                    )
-            if msg is not None:
-                logger.error(f"{stim_id}: Block {block_idx}: {msg}")
-                results.append(not_using_diode(msg, vsyncs_per_diode_flip))
-                continue
+        times = estimate.times
+        src = frame_source(vsyncs, times)
+        if len(estimate.early_frames):
+            early_note = (
+                f"{len(estimate.early_frames)} frame(s) with a diode flip less than "
+                f"{MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after their vsync rising edge "
+                f"(flip misassigned) given vsync + constant lag (frame_source 2): frame(s) "
+                + ", ".join(str(int(i)) for i in estimate.early_frames)
+            )
+            logger.warning(f"{stim_id}: Block {block_idx}: {early_note}")
+            notes = early_note if notes is None else f"{notes}; {early_note}"
+            if src is None:
+                src = np.zeros(len(vsyncs), dtype=np.int8)
+            src[estimate.early_frames] = 2
 
         results.append(
             BlockDisplayTimes(
@@ -661,7 +603,8 @@ def get_display_times(
                 display_times=times + MONITOR_CENTER_REFRESH_TIME,
                 source="photodiode",
                 diode_box_frame_interval=vsyncs_per_diode_flip,
-                frame_source=frame_source(vsyncs, times),
+                frame_source=src,
+                notes=notes,
             )
         )
         logger.info(f"Added frame display times for {stim_path}")
@@ -670,6 +613,205 @@ def get_display_times(
         vsync_times_in_blocks
     ), f"{sync_data}: {len(results)} blocks of diode flips matched to {len(vsync_times_in_blocks)} blocks of vsyncs"
     return tuple(results)
+
+
+MAX_EARLY_FRAMES = 3
+"""A photodiode block with up to this many frames whose diode flip is earlier than their vsync
+rising edge + `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC` keeps its photodiode times: those frames get
+vsync + `CONSTANT_MONITOR_LAG` (`frame_source` 2). Seen after a dropped frame with a short vsync
+pulse (714748_2024-06-24, 733891_2024-09-17) and on the frame invented at the end of a block
+(742903_2024-10-24, npc_stim#9). With more, the flips are taken to be misassigned."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _BlockEstimate:
+    """One attempt at a block's photodiode display times (without
+    `MONITOR_CENTER_REFRESH_TIME`)."""
+
+    times: npt.NDArray[np.float64] | None
+    reason: str | None = None
+    """Why the photodiode can't be used (None if `times` are usable)."""
+    diode_box_frame_interval: int | None = None
+    retryable: bool = True
+    """The failure may depend on where the diode-flip window starts."""
+    early_frames: npt.NDArray[np.intp] = dataclasses.field(
+        default_factory=lambda: np.array([], dtype=np.intp)
+    )
+    """Frames given vsync + constant lag (see `MAX_EARLY_FRAMES`)."""
+
+
+def _estimate_block_display_times(
+    *,
+    sync_data_name: str,
+    block_idx: int,
+    stim_id: str,
+    vsyncs: npt.NDArray[np.float64],
+    vsync_rising_edges: npt.NDArray[np.float64],
+    rising: npt.NDArray[np.float64],
+    falling: npt.NDArray[np.float64],
+    first_frame_start: float,
+    vsyncs_per_diode_flip: int,
+    expected_vsyncs: int,
+    diode_cleaned: bool,
+    raise_on_error: bool,
+) -> _BlockEstimate:
+    """Photodiode display times for one block (see `get_display_times`), with diode flips kept
+    from `first_frame_start` + `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC`."""
+
+    def fail(
+        reason: str, interval: int | None = vsyncs_per_diode_flip, retryable: bool = True
+    ) -> _BlockEstimate:
+        return _BlockEstimate(
+            None, reason, diode_box_frame_interval=interval, retryable=retryable
+        )
+
+    # keep flips after the start of the first frame + an empirically determined min latency
+    # between vsync and screen update
+    falling = falling[falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+    rising = rising[rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+
+    # keep flips only up to a certain time after the last vsync
+    falling = falling[falling < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+    rising = rising[rising < (vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+
+    if not len(rising) or not len(falling):
+        # previously an IndexError that failed the whole session (DRpilot_796848_20250715)
+        msg = f"no diode {'rising' if not len(rising) else 'falling'} edges between the block's first vsync and {MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after its last"
+        logger.warning(f"{sync_data_name} block {block_idx}: {msg}")
+        return fail(msg, None)
+
+    is_first_frame_on = rising[0] < falling[0]  # may be updated below
+
+    if vsyncs_per_diode_flip == 1 and expected_vsyncs != len(vsyncs):
+        msg = f"{len(vsyncs)} vsyncs, expected {expected_vsyncs} from stim file"
+        logger.warning(f"Block {block_idx} has {msg}: Skipping")
+        return fail(msg, retryable=False)
+
+    def concat_flips(rising, falling):
+        """Concatenate the rising and falling edges into a single array."""
+        return np.sort(np.concatenate((rising, falling)))
+
+    def split_flips(concat_flips, is_first_frame_on):
+        """Split the concatenated flips into rising and falling edges."""
+        on = concat_flips[::2]
+        off = concat_flips[1::2]
+        if is_first_frame_on:
+            return (on, off)
+        else:
+            return (off, on)
+
+    flips = concat_flips(rising, falling)
+    # a block whose diode edges the SyncPatch cleaned is used as patched: the patch is the
+    # one place where edges are removed (phantom flicker, glitches), so don't remove more
+    while not diode_cleaned and any(
+        anomalous_interval_indices(flips, vsyncs_per_diode_flip)
+    ):
+
+        indices = anomalous_interval_indices(flips, vsyncs_per_diode_flip)
+        # just delete one interval then check again:
+        logger.warning(f"Removing anomalous short diode interval in block {block_idx}")
+        flips = np.delete(flips, slice(indices[0], indices[0] + 2))
+        if 0 in indices:
+            is_first_frame_on = not is_first_frame_on
+
+    # one flip per `vsyncs_per_diode_flip` frames. For N > 1 this check didn't exist: a block
+    # whose flips were mostly removed above would get almost all of its display times invented
+    # at the end of the block (`n_missing` in `get_frame_display_times`). Across 787 box-3
+    # blocks the excess after removal is within +/-1 of ceil(n_vsyncs / 3).
+    expected_flips = int(np.ceil(len(vsyncs) / vsyncs_per_diode_flip))
+    if np.abs(len(flips) - expected_flips) > 5:
+        msg = (
+            f"{len(flips)} diode flips (after basic filtering), but {len(vsyncs)} vsyncs"
+            + (
+                f" (expected {expected_flips} flips with diodeBoxFrameInterval={vsyncs_per_diode_flip})"
+                if vsyncs_per_diode_flip > 1
+                else ""
+            )
+        )
+        logger.warning(f"Block {block_idx} has {msg}: Skipping")
+        return fail(msg)
+
+    rising, falling = split_flips(flips, is_first_frame_on)
+
+    try:
+        times = get_frame_display_times(
+            vsync_times=vsyncs,
+            on_flip_times=rising,
+            off_flip_times=falling,
+            vsyncs_per_flip=vsyncs_per_diode_flip,
+            adjust_dropped_frames=True,
+            check_lengths=False,
+            check_vsyncs=True,
+            stim_id=stim_id,
+            vsync_rising_times=vsync_rising_edges,
+        )
+    except (AssertionError, IndexError) as exc:
+        if raise_on_error:
+            raise
+        logger.exception(
+            f"Failed to get correct frame display times for {stim_id} block {block_idx}"
+        )
+        return fail(f"estimator failed: {exc!r}")
+
+    if vsyncs_per_diode_flip == 1:
+        while len(times) < len(vsyncs):
+            if len(vsyncs) - len(times) > 3:
+                # previously raised from `get_display_times`, failing the whole sync file
+                msg = (
+                    f"{len(times)} frame display times, but {len(vsyncs)} vsyncs: too many "
+                    "missing frames"
+                )
+                if raise_on_error:
+                    raise AssertionError(f"{stim_id}: Block {block_idx} has {msg}")
+                return fail(msg)
+            times = add_missing_diode_flips_for_truncated_sync(times, vsyncs)
+
+        if (len(times) == len(vsyncs) + 1) and times[-1] > vsyncs[-1] + (
+            times[:-1] - vsyncs
+        ).mean():
+            # special case where we have an extra flip at the end, which doesn't correspond to a vsync
+            # - can happen if the last frame's sync square is high and the screen then returns to black
+            times = times[:-1]
+        if len(times) - len(vsyncs) < 5:
+            # if we have a few more frames than vsyncs, we can assume these are just extra frames
+            # at the end of the block caused by spontaneous flicker, so we remove them
+            times = times[: len(vsyncs)]
+        if len(times) != len(vsyncs):
+            return fail(f"{len(times)} frame display times, but {len(vsyncs)} vsyncs")
+
+    early = np.array([], dtype=np.intp)
+    if len(times) == len(vsyncs):
+        problem: str | None
+        times, problem = correct_whole_block_frame_offset(times, vsyncs)
+        if problem is None:
+            # replaces the disabled `display >= vsync` assert: vsync falling edges can be
+            # late (a delay between the buffer swap and the falling-edge write), but a frame
+            # can't be displayed before its frame signal went high (+ the minimum
+            # vsync-to-flip latency)
+            early = np.flatnonzero(
+                times < vsync_rising_edges + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+            )
+            if len(early):
+                problem = (
+                    f"{len(early)} frame(s) have a diode flip less than "
+                    f"{MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC * 1e3:.0f} ms after their vsync rising edge "
+                    "(frame signal raised before draw + flip): flips are misassigned"
+                )
+                if len(early) <= MAX_EARLY_FRAMES:
+                    # isolated frames (see `MAX_EARLY_FRAMES`): use constant lag for them only
+                    times = times.copy()
+                    times[early] = vsyncs[early] + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+                    problem = (
+                        None
+                        if np.all(np.diff(times) > 0)
+                        else f"{problem} (vsync + constant lag for them is out of order)"
+                    )
+        if problem is not None:
+            return fail(problem)
+
+    return _BlockEstimate(
+        times, diode_box_frame_interval=vsyncs_per_diode_flip, early_frames=early
+    )
 
 
 # plots -------------------------------------------------------------------- #
