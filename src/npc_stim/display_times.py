@@ -574,9 +574,7 @@ def get_display_times(
         if estimate.reason is not None or estimate.times is None:
             logger.error(f"{stim_id}: Block {block_idx}: {estimate.reason}")
             results.append(
-                not_using_diode(
-                    str(estimate.reason), estimate.diode_box_frame_interval
-                )
+                not_using_diode(str(estimate.reason), estimate.diode_box_frame_interval)
             )
             continue
 
@@ -659,7 +657,9 @@ def _estimate_block_display_times(
     from `first_frame_start` + `MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC`."""
 
     def fail(
-        reason: str, interval: int | None = vsyncs_per_diode_flip, retryable: bool = True
+        reason: str,
+        interval: int | None = vsyncs_per_diode_flip,
+        retryable: bool = True,
     ) -> _BlockEstimate:
         return _BlockEstimate(
             None, reason, diode_box_frame_interval=interval, retryable=retryable
@@ -667,7 +667,9 @@ def _estimate_block_display_times(
 
     # keep flips after the start of the first frame + an empirically determined min latency
     # between vsync and screen update
-    falling = falling[falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
+    falling = falling[
+        falling > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)
+    ]
     rising = rising[rising > (first_frame_start + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC)]
 
     # keep flips only up to a certain time after the last vsync
