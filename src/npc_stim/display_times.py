@@ -17,6 +17,9 @@ Orchestration changes:
   `diodeBoxFrameInterval` key is only accepted for files that pre-date the key
 - the constant-lag fallback and re-raising errors are explicit parameters rather than env
   vars, and the source of each block's times is returned with the times
+- a block that gets the constant-lag fallback also gets a check of its vsyncs against the stim
+  file's `frameIntervals` (`check_frame_indices`, returned as
+  `BlockDisplayTimes.frame_index_check`): constant lag is only as good as the vsyncs
 
 Photodiode phantom flicker (extra edges while a frame is held, diodeBoxFrameInterval 1) and
 comparator glitches are removed by the sync file's `npc_sync.SyncPatch`, which also records per
@@ -80,8 +83,266 @@ SUSPICIOUS_INTERVAL_THRESHOLD = 0.3 / FRAME_RATE
 DEFINITE_SHORT_INTERVAL_THRESHOLD = 0.05 / FRAME_RATE
 # at 60 fps we should never have diode-flip intervals this small: consider them anomalous
 
+LONG_FRAME_THRESHOLD = 1.5
+"""A frame is 'long' (at least one dropped refresh) if the interval to the next frame is more
+than this many refresh periods. See `check_frame_indices`."""
+
+FRAME_INDEX_CHECK_WINDOW = 3
+"""Frames either side of a long frame over which the vsync and stim-file timelines are compared
+(medians), in `check_frame_indices`. 3 is the smallest window whose median ignores one frame:
+it gives the +/-1 index tolerance."""
+
+FRAME_INDEX_CHECK_MAX_STEP = 0.25
+"""Max difference, in refresh periods, between the time that passes across a long frame
+according to the vsyncs and according to the stim file, in `check_frame_indices`."""
+
+FRAME_INDEX_CHECK_MAX_CLOCK_DRIFT = 20e-6
+"""Max difference between a block's duration on sync and in the stim file, as a fraction of
+the duration (in addition to `FRAME_INDEX_CHECK_MAX_STEP`). See `check_frame_indices`."""
+
 DisplayTimeSource: TypeAlias = Literal["photodiode", "constant_lag", "unavailable"]
 Fallback: TypeAlias = Literal["constant_lag"] | None
+
+
+@dataclasses.dataclass(frozen=True)
+class FrameIndexCheck:
+    """Result of comparing a block's long (dropped) frames on sync (vsyncs) with those in the
+    stim file (`frameIntervals`): see `check_frame_indices` for the rule."""
+
+    passed: bool | None
+    """True: vsyncs and stim file agree. False: they don't. None: the check couldn't be run
+    (see `reason`)."""
+    reason: str | None = None
+    """Why the check failed or couldn't be run (None if it passed)."""
+    n_long_sync: int | None = None
+    """Long frames in the vsyncs."""
+    n_long_stim: int | None = None
+    """Long frames in the stim file."""
+    n_same_index: int | None = None
+    """Long frames at the same index in both."""
+    n_adjacent_index: int | None = None
+    """Long frames in the vsyncs paired with a long frame at index +/-1 in the stim file."""
+    n_unpaired: int | None = None
+    """Long frames in one with no long frame within +/-1 index in the other."""
+    n_unmatched: int | None = None
+    """Long frames (in either) across which the vsyncs and the stim file disagree on the time
+    that passed: any fails the check. Paired long frames are counted once."""
+    unmatched_frames: tuple[int, ...] = ()
+    """Indices of up to the first 20 unmatched long frames."""
+    max_step: float | None = None
+    """Largest disagreement across a long frame (seconds; signed, sync - stim file)."""
+    duration_diff: float | None = None
+    """Block duration (first to last frame) on sync minus in the stim file (seconds)."""
+    duration_tolerance: float | None = None
+    """Max `abs(duration_diff)` allowed (seconds)."""
+    refresh_period: float | None = None
+    """Median stim-file frame interval (seconds)."""
+
+    @property
+    def summary(self) -> str:
+        """One line, for logs and notes."""
+        if self.n_long_sync is None:
+            return f"frame index check not run: {self.reason}"
+        assert self.duration_diff is not None and self.max_step is not None
+        return (
+            f"frame index check {'passed' if self.passed else 'failed'}: "
+            f"{self.n_long_sync} long frames on sync, {self.n_long_stim} in stim file "
+            f"({self.n_same_index} at the same index, {self.n_adjacent_index} at +/-1, "
+            f"{self.n_unpaired} unpaired, {self.n_unmatched} unmatched), max step "
+            f"{self.max_step * 1e3:.2f} ms, duration difference {self.duration_diff * 1e3:.2f} ms"
+            + ("" if self.reason is None else f": {self.reason}")
+        )
+
+
+def check_frame_indices(
+    vsync_times: npt.ArrayLike, frame_intervals: npt.ArrayLike
+) -> FrameIndexCheck:
+    """Do the long (dropped) frames in a block's vsyncs match those in its stim file?
+
+    The acceptance check for a block that uses vsync + `CONSTANT_MONITOR_LAG`: without the
+    photodiode, display times are only as good as the vsyncs, and the stim file's
+    `frameIntervals` (PsychoPy's own flip-to-flip times) are the one independent record of them.
+    It can't see frames that were displayed late after the flip returned: neither line records
+    them.
+
+    - `vsync_times`: vsync falling edges for the block (seconds on sync), one per frame.
+    - `frame_intervals`: `frameIntervals` from the stim file (seconds), one fewer.
+
+    With T the refresh period (median of `frame_intervals`), interval k the time from frame k
+    to frame k + 1, and c[j] = (vsync j - vsync 0) - sum(frame_intervals[:j]), the time of
+    frame j on sync minus its time in the stim file:
+
+    1. Frame k is long if interval k > `LONG_FRAME_THRESHOLD` (1.5) * T, in the vsyncs or in
+       the stim file. Intervals aren't whole numbers of refreshes in either (a swap can come
+       mid-refresh, followed by a short interval), so an interval near 1.5 T can be long in
+       one and not the other.
+    2. A long frame k matches if both agree on the time that passes across it:
+       abs(median(c[k+1 : k+1+W]) - median(c[k+1-W : k+1])) <= `FRAME_INDEX_CHECK_MAX_STEP`
+       (0.25) * T, with W = `FRAME_INDEX_CHECK_WINDOW` (3) frames. A median of 3 ignores one
+       frame, so this allows:
+         - the same long frame at index k in one and k +/- 1 in the other: jitter in the vsync
+           edge between them splits the interval differently (e.g. 31.7 + 18.3 ms on sync,
+           16.7 + 33.4 ms in the stim file);
+         - one late vsync falling edge (a long then a short interval on sync only, e.g.
+           26.7 + 6.4 ms vs 17.8 + 15.5 ms), next to the long frame or itself over the
+           threshold: no refresh was dropped.
+       It doesn't allow a long frame 2 or more indices away in the other, a long frame
+       missing from the other, or one that is a different number of refreshes long: each
+       shifts c by about a refresh (T) or more for 2 or more frames.
+    3. The block's duration is the same: abs(c[-1]) <= `FRAME_INDEX_CHECK_MAX_STEP` * T +
+       `FRAME_INDEX_CHECK_MAX_CLOCK_DRIFT` (20 ppm) * duration. The sync and stim clocks run
+       at slightly different rates, so this can't resolve single frames in a long block (one
+       refresh in an hour is 4.6 ppm): it's a check for gross differences; rule 2 is the
+       frame-level one.
+
+    The check passes if no long frame is unmatched and the duration is the same.
+
+    Thresholds, from the 175 photodiode blocks (all stims) of 28 sessions from 2023-08 to
+    2024-06, with 34,567 long frames (hub/experiments/constant-lag-acceptance):
+
+    - step across a long frame (rule 2): at most 0.016 T (0.26 ms), against about 1 T for a
+      real mismatch. Any limit from 0.03 to 0.9 T passes every block; 0.25 T is 16x the
+      largest seen. A refresh added to, removed from or moved by 2 frames at a long frame in
+      the stim file was detected every time (474 long frames).
+    - with W = 2 (no index tolerance) 34 long frames have a step over 0.25 T (up to 6 in a
+      block, in 21 blocks): W = 3 is needed. W = 5 gives the same results as 3.
+    - clock rate difference (rule 3): -5.5 to +1.3 ppm; 20 ppm is over 3x the largest seen.
+    - 1.5 T is halfway between one and two refreshes. 4% of intervals over 1.25 T are
+      between 1.25 and 1.75 T (the rest are close to a whole number of refreshes), and rule 2
+      covers the ones that land either side of the threshold: any threshold from 1.25 to
+      1.75 T gives the same results.
+
+    Counts of long frames at the same index, at +/-1 (paired one-to-one in order) and
+    unpaired are returned for information; only rule 2 and 3 decide `passed`.
+
+    >>> v = np.arange(100) / 60
+    >>> v[50:] += 1 / 60                        # one dropped refresh after frame 49
+    >>> check_frame_indices(v, np.diff(v)).passed
+    True
+    >>> f = np.diff(v)
+    >>> f[[49, 50]] = f[[50, 49]]               # long frame at 50 in the stim file
+    >>> r = check_frame_indices(v, f)
+    >>> r.passed, r.n_same_index, r.n_adjacent_index
+    (True, 0, 1)
+    >>> f = np.diff(v)
+    >>> f[[49, 51]] = f[[51, 49]]               # long frame at 51 in the stim file
+    >>> r = check_frame_indices(v, f)
+    >>> r.passed, r.n_unmatched, r.unmatched_frames
+    (False, 2, (49, 51))
+    >>> r = check_frame_indices(v, np.full(99, 1 / 60))  # not in the stim file at all
+    >>> r.passed, r.n_unmatched
+    (False, 1)
+    >>> check_frame_indices(v, np.full(98, 1 / 60)).reason
+    '100 vsyncs, but 98 frame intervals in the stim file (expected 99)'
+    """
+    vsyncs = np.asarray(vsync_times, dtype=float)
+    stim_intervals = np.asarray(frame_intervals, dtype=float)
+    if len(vsyncs) < 2 or len(stim_intervals) != len(vsyncs) - 1:
+        return FrameIndexCheck(
+            passed=None if len(vsyncs) < 2 else False,
+            reason=f"{len(vsyncs)} vsyncs, but {len(stim_intervals)} frame intervals in the stim "
+            f"file (expected {max(len(vsyncs) - 1, 0)})",
+        )
+    period = float(np.median(stim_intervals))
+    sync_intervals = np.diff(vsyncs)
+    # time of each frame on sync minus its time in the stim file
+    c = (vsyncs - vsyncs[0]) - np.concatenate(([0.0], np.cumsum(stim_intervals)))
+
+    long_sync = np.flatnonzero(sync_intervals > LONG_FRAME_THRESHOLD * period)
+    long_stim = np.flatnonzero(stim_intervals > LONG_FRAME_THRESHOLD * period)
+
+    # pair long frames for reporting: same index, then +/-1 (one-to-one, in order)
+    same = np.intersect1d(long_sync, long_stim)
+    sync_only = np.setdiff1d(long_sync, same)
+    stim_only = np.setdiff1d(long_stim, same)
+    adjacent: list[tuple[int, int]] = []
+    i = j = 0
+    while i < len(sync_only) and j < len(stim_only):
+        d = int(sync_only[i]) - int(stim_only[j])
+        if abs(d) <= 1:
+            adjacent.append((int(sync_only[i]), int(stim_only[j])))
+            i += 1
+            j += 1
+        elif d < 0:
+            i += 1
+        else:
+            j += 1
+    n_unpaired = len(sync_only) + len(stim_only) - 2 * len(adjacent)
+
+    # rule 2: step in c across each long frame
+    w = FRAME_INDEX_CHECK_WINDOW
+    long_frames = np.union1d(long_sync, long_stim)
+    steps = np.array(
+        [
+            np.median(c[k + 1 : k + 1 + w]) - np.median(c[max(k + 1 - w, 0) : k + 1])
+            for k in long_frames
+        ]
+    )
+    bad = set(long_frames[np.abs(steps) > FRAME_INDEX_CHECK_MAX_STEP * period].tolist())
+    # the two halves of a pair are one long frame
+    n_unmatched = len(bad) - sum(a in bad and b in bad for a, b in adjacent)
+    max_step = float(steps[np.argmax(np.abs(steps))]) if len(steps) else 0.0
+
+    # rule 3: duration
+    duration_diff = float(c[-1])
+    duration_tolerance = float(
+        FRAME_INDEX_CHECK_MAX_STEP * period
+        + FRAME_INDEX_CHECK_MAX_CLOCK_DRIFT * (vsyncs[-1] - vsyncs[0])
+    )
+
+    reasons = []
+    if n_unmatched:
+        frames = sorted(bad)
+        reasons.append(
+            f"{n_unmatched} long frame(s) don't match between vsyncs and stim file "
+            f"(max step {max_step * 1e3:.1f} ms): frame(s) "
+            + ", ".join(str(k) for k in frames[:20])
+            + (", ..." if len(frames) > 20 else "")
+        )
+    if abs(duration_diff) > duration_tolerance:
+        reasons.append(
+            f"block duration differs by {duration_diff * 1e3:.1f} ms between vsyncs and stim "
+            f"file (tolerance {duration_tolerance * 1e3:.1f} ms)"
+        )
+    return FrameIndexCheck(
+        passed=not reasons,
+        reason="; ".join(reasons) or None,
+        n_long_sync=len(long_sync),
+        n_long_stim=len(long_stim),
+        n_same_index=len(same),
+        n_adjacent_index=len(adjacent),
+        n_unpaired=n_unpaired,
+        n_unmatched=n_unmatched,
+        unmatched_frames=tuple(sorted(bad)[:20]),
+        max_step=max_step,
+        duration_diff=duration_diff,
+        duration_tolerance=duration_tolerance,
+        refresh_period=period,
+    )
+
+
+def get_frame_index_check(
+    vsync_times: npt.ArrayLike,
+    stim_path_or_data: npc_io.PathLike | h5py.File | None,
+) -> FrameIndexCheck:
+    """`check_frame_indices` for a block of vsyncs and its stim file (any block, whatever the
+    source of its display times): e.g. `get_frame_index_check(block.vsync_times,
+    block.stim_path)` for a `BlockDisplayTimes`. `passed` is None if the stim file is missing
+    or its `frameIntervals` can't be read."""
+    if stim_path_or_data is None:
+        return FrameIndexCheck(passed=None, reason="no stim file matched to block")
+    try:
+        stim_data = npc_stim.stim.get_h5_stim_data(stim_path_or_data)
+        try:
+            frame_intervals = stim_data["frameIntervals"][:]
+        finally:
+            if stim_data is not stim_path_or_data:
+                stim_data.close()
+    except (OSError, KeyError) as exc:
+        return FrameIndexCheck(
+            passed=None, reason=f"frameIntervals can't be read from stim file: {exc!r}"
+        )
+    return check_frame_indices(vsync_times, frame_intervals)
 
 
 def get_plot_dir(mkdir: bool = False) -> upath.UPath | None:
@@ -122,6 +383,10 @@ class BlockDisplayTimes:
     notes: str | None = None
     """Diagnostics for a photodiode block: frames given constant lag (`frame_source` 2), or the
     diode-flip window starting at the first vsync's rising edge."""
+    frame_index_check: FrameIndexCheck | None = None
+    """For `source='constant_lag'`: do the long (dropped) frames in the vsyncs match the stim
+    file's (`check_frame_indices`)? `passed` is None if it couldn't be run (no stim file).
+    None for other sources (not run: use `get_frame_index_check`)."""
 
     @property
     def is_photodiode(self) -> bool:
@@ -378,7 +643,10 @@ def get_display_times(
     - `fallback='constant_lag'`: blocks where the photodiode can't be used (including blocks
       whose photodiode edges the `SyncPatch` rejected) get vsync + `CONSTANT_MONITOR_LAG`, with
       `source='constant_lag'`. Default: no display times (`source='unavailable'`). Blocks
-      overlapping a span the patch couldn't reconstruct never get a fallback.
+      overlapping a span the patch couldn't reconstruct never get a fallback. Blocks that get
+      the fallback also get `BlockDisplayTimes.frame_index_check`: whether the long (dropped)
+      frames in the vsyncs match those in the stim file (`check_frame_indices`). The times
+      are returned either way: it's up to the caller not to use a block that fails.
     - a photodiode block with up to `MAX_EARLY_FRAMES` frames whose diode flip comes too soon
       after their vsync rising edge keeps its photodiode times, with constant lag for those
       frames (`frame_source` 2, listed in `BlockDisplayTimes.notes`)
@@ -465,6 +733,13 @@ def get_display_times(
         def not_using_diode(
             reason: str, vsyncs_per_diode_flip: int | None
         ) -> BlockDisplayTimes:
+            check = None
+            if fallback == "constant_lag":
+                check = get_frame_index_check(vsyncs, stim_path)
+                logger.log(
+                    logging.INFO if check.passed else logging.WARNING,
+                    f"{sync_data} block {block_idx}: constant lag: {check.summary}",
+                )
             return BlockDisplayTimes(
                 block_index=block_idx,
                 stim_path=stim_path,
@@ -480,6 +755,7 @@ def get_display_times(
                 frame_source=(
                     frame_source(vsyncs, None) if fallback == "constant_lag" else None
                 ),
+                frame_index_check=check,
             )
 
         diode_record = _diode_block_record(sync_data, vsyncs)
@@ -766,7 +1042,19 @@ def _estimate_block_display_times(
                 if raise_on_error:
                     raise AssertionError(f"{stim_id}: Block {block_idx} has {msg}")
                 return fail(msg)
+            n_times = len(times)
             times = add_missing_diode_flips_for_truncated_sync(times, vsyncs)
+            if len(times) == n_times:
+                # nothing added: the last flip is already later than the last vsync + the mean
+                # latency, so the missing flips aren't at the end of the block (previously
+                # looped forever: 60-s chunks of 712815_2024-05-23 and 726088_2024-06-20)
+                msg = (
+                    f"{len(times)} frame display times, but {len(vsyncs)} vsyncs, and the "
+                    "missing diode flips aren't at the end of the block"
+                )
+                if raise_on_error:
+                    raise AssertionError(f"{stim_id}: Block {block_idx} has {msg}")
+                return fail(msg)
 
         if (len(times) == len(vsyncs) + 1) and times[-1] > vsyncs[-1] + (
             times[:-1] - vsyncs

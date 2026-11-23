@@ -5,6 +5,7 @@ test_discontinuities.py)."""
 from __future__ import annotations
 
 import pathlib
+import threading
 import time
 
 import h5py
@@ -14,6 +15,9 @@ import pytest
 import upath
 
 import npc_stim
+import npc_stim.display_times
+
+FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
 
 def _stim_paths(sync_path: str) -> tuple[upath.UPath, ...]:
@@ -66,7 +70,155 @@ def test_missing_diode_box_frame_interval_is_1(tmp_path: pathlib.Path) -> None:
         assert npc_stim.get_diode_box_frame_interval(path) == 1
 
 
+# estimator ------------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("raise_on_error", (False, True))
+def test_missing_flips_not_at_end_of_block_fails_instead_of_hanging(
+    raise_on_error: bool,
+) -> None:
+    """60 s (3600 frames) of the 712815_2024-05-23 task from 1143.6 s, times relative to the first
+    vsync: the estimator returns 3597 display times and the last flip is already later than the
+    last vsync + the mean latency, so `add_missing_diode_flips_for_truncated_sync` adds nothing
+    and npc_stim <= 0.1.28 looped forever."""
+    data = np.load(FIXTURES_DIR / "chunk_missing_flips_not_at_end.npz")
+    result: list = []
+
+    def helper() -> None:
+        try:
+            result.append(
+                npc_stim.display_times._estimate_block_display_times(
+                    sync_data_name="712815_2024-05-23",
+                    block_idx=0,
+                    stim_id="712815_2024-05-23_chunk",
+                    vsyncs=data["vsyncs"],
+                    vsync_rising_edges=data["vsync_rising_edges"],
+                    rising=data["rising"],
+                    falling=data["falling"],
+                    first_frame_start=float(data["vsyncs"][0]),
+                    vsyncs_per_diode_flip=1,
+                    expected_vsyncs=len(data["vsyncs"]),
+                    diode_cleaned=False,
+                    raise_on_error=raise_on_error,
+                )
+            )
+        except BaseException as exc:  # an exception in a thread is otherwise swallowed
+            result.append(exc)
+
+    t = threading.Thread(target=helper, daemon=True)  # daemon: a hang mustn't block exit
+    t.start()
+    t.join(60)
+    assert not t.is_alive(), "estimator is looping forever"
+    expected = "3597 frame display times, but 3600 vsyncs, and the missing diode flips aren't"
+    if raise_on_error:
+        assert isinstance(result[0], AssertionError) and expected in str(result[0])
+    else:
+        assert result[0].times is None
+        assert expected in result[0].reason
+        assert result[0].retryable  # so that `get_display_times` still tries the rising-edge window
+
+
+# frame index check (constant-lag blocks) ------------------------------------------ #
+
+
+def _vsyncs_with_long_frames(
+    n: int = 2000, long_frames: tuple[int, ...] = (500, 1200)
+) -> np.ndarray:
+    intervals = np.full(n - 1, 1 / 60)
+    intervals[list(long_frames)] *= 2
+    return 100 + np.concatenate(([0], np.cumsum(intervals)))
+
+
+def test_frame_index_check_passes_with_clock_drift_and_jitter() -> None:
+    v = _vsyncs_with_long_frames()
+    stim = np.diff(v) * (1 + 5e-6)  # stim PC clock 5 ppm slow
+    v = v.copy()
+    v[800] += 0.0047  # one late vsync falling edge: +4.7, -4.7 ms on sync only
+    v[1201] += 0.010  # ... on the frame after a long frame
+    v[300] += 0.009  # ... that takes an interval over the threshold (25.7 ms)
+    check = npc_stim.check_frame_indices(v, stim)
+    assert check.passed is True and check.reason is None
+    assert (check.n_long_sync, check.n_long_stim, check.n_same_index) == (3, 2, 2)
+    assert (check.n_adjacent_index, check.n_unpaired, check.n_unmatched) == (0, 1, 0)
+    assert abs(check.max_step) < 1e-4
+
+
+def test_frame_index_check_tolerates_long_frame_split_across_adjacent_frames() -> None:
+    v = _vsyncs_with_long_frames()
+    stim = np.diff(v)
+    v = v.copy()
+    v[501] -= 0.015  # intervals 500, 501 on sync: 18.3, 31.7 ms; in the stim file: 33.3, 16.7 ms
+    check = npc_stim.check_frame_indices(v, stim)
+    assert check.passed is True
+    assert (check.n_same_index, check.n_adjacent_index, check.n_unmatched) == (1, 1, 0)
+
+
+@pytest.mark.parametrize(
+    "stim_long_frames, n_unmatched",
+    (
+        ((500,), 1),  # dropped frame on sync that the stim file doesn't have
+        ((500, 1200, 1500), 1),  # ... and the reverse
+        ((500, 1202), 2),  # 2 frames apart
+    ),
+)
+def test_frame_index_check_fails(stim_long_frames: tuple[int, ...], n_unmatched: int) -> None:
+    v = _vsyncs_with_long_frames()
+    stim = np.diff(_vsyncs_with_long_frames(long_frames=stim_long_frames))
+    check = npc_stim.check_frame_indices(v, stim)
+    assert check.passed is False
+    assert check.n_unmatched == n_unmatched
+    assert "don't match" in check.reason
+    assert abs(abs(check.max_step) - 1 / 60) < 1e-4
+
+
+def test_frame_index_check_fails_on_different_number_of_dropped_refreshes() -> None:
+    v = _vsyncs_with_long_frames()
+    stim = np.diff(v).copy()
+    stim[500] += 1 / 60  # 2 refreshes dropped in the stim file, 1 on sync, at the same index
+    check = npc_stim.check_frame_indices(v, stim)
+    assert check.passed is False
+    assert (check.n_same_index, check.n_unmatched, check.unmatched_frames) == (2, 1, (500,))
+
+
+def test_frame_index_check_fails_on_duration() -> None:
+    v = _vsyncs_with_long_frames()
+    check = npc_stim.check_frame_indices(v, np.diff(v) * 1.001)
+    assert check.passed is False
+    assert check.n_unmatched == 0
+    assert "duration" in check.reason
+
+
+def test_frame_index_check_not_run_without_stim_file(tmp_path: pathlib.Path) -> None:
+    v = _vsyncs_with_long_frames()
+    assert npc_stim.get_frame_index_check(v, None).passed is None
+    no_intervals = _write_stim(tmp_path / "no_intervals.hdf5", "20240101_120000", 1)
+    check = npc_stim.get_frame_index_check(v, no_intervals)
+    assert check.passed is None and "frameIntervals" in check.reason
+    path = tmp_path / "stim.hdf5"
+    with h5py.File(path, "w") as f:
+        f["frameIntervals"] = np.diff(v)
+    assert npc_stim.get_frame_index_check(v, path).passed is True
+    assert npc_stim.get_frame_index_check(v[:-1], path).passed is False  # frame count
+
+
 # known files (S3) ----------------------------------------------------------------- #
+
+
+def test_frame_index_check_only_for_constant_lag_blocks() -> None:
+    """699847_2024-04-18 (no SyncPatch): the photodiode is absent for half of the task."""
+    sync = "s3://aind-private-data-prod-o5171v/ecephys_699847_2024-04-18_13-42-34/behavior/20240418T134234.h5"
+    blocks = _display_times(sync, fallback="constant_lag")
+    assert {b.source for b in blocks} == {"photodiode", "constant_lag"}
+    for b in blocks:
+        if b.source == "photodiode":
+            assert b.frame_index_check is None
+            continue
+        assert b.frame_index_check == npc_stim.get_frame_index_check(b.vsync_times, b.stim_path)
+    task = next(b for b in blocks if b.stim_path and "DynamicRouting1" in b.stim_path.name)
+    assert task.source == "constant_lag"
+    assert task.frame_index_check.passed is True
+    assert (task.frame_index_check.n_long_sync, task.frame_index_check.n_same_index) == (221, 221)
+    assert all(b.frame_index_check is None for b in _display_times(sync))  # no fallback
 
 
 def test_slow_processing_file() -> None:
