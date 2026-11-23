@@ -1416,7 +1416,7 @@ wheels = [
 
 [[package]]
 name = "npc-stim"
-version = "0.1.28"
+version = "0.1.29"
 source = { editable = "." }
 default-groups = ["bump", "linting", "task-runner", "testing"]
 dependencies = [
