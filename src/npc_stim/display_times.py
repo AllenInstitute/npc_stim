@@ -100,6 +100,33 @@ FRAME_INDEX_CHECK_MAX_CLOCK_DRIFT = 20e-6
 """Max difference between a block's duration on sync and in the stim file, as a fraction of
 the duration (in addition to `FRAME_INDEX_CHECK_MAX_STEP`). See `check_frame_indices`."""
 
+HELD_FRAME_MAX_PULSE = 1.1
+"""Longest frame-signal pulse (vsync rising edge to falling edge), in refresh periods, for which
+a frame's vsync falling edge is used to place it after a held frame, in
+`get_frame_display_times` (diodeBoxFrameInterval 1): see `get_held_off_frame_refreshes`.
+
+The frame signal goes high before the frame is drawn and flipped, and low when the flip
+returns, at the vertical blank where the frame was swapped in. If the flip returns a refresh
+late (the frame is then on screen a refresh before its falling edge + latency), the pulse is a
+refresh longer than the wait for the vertical blank.
+
+From the ON frames that follow a held frame (their display time is measured: the diode's
+rising edge) in 1,308 box-1 blocks of 247 sessions, by pulse length: under 1.1 refreshes, 4 of
+181,894 are on screen 0.75 - 1.5 refreshes before falling edge + latency (0.002%); 1.1 - 1.3:
+20 of 14,350 (0.14%); 1.3 - 1.5: 22 of 267 (8%); 1.5 or more: 403 of 671 (60%). Pulses of
+1.05 - 1.1 refreshes are the commonest among held frames (the frame signal went high about
+1.4 ms before a vertical blank, too late for the frame to be swapped in at it). Of the long
+ON-ON intervals where the vsync falling edge and the diode's OFF edge disagree, those with a
+pulse under 1.1 are frames with an early OFF edge; with longer pulses they are mostly late
+returns (hub/experiments/npc-stim-held-frames)."""
+
+HELD_FRAME_GRID_TOLERANCE = 0.2
+"""Max distance, in refresh periods, between a frame's vsync falling edge + latency and a whole
+number of refreshes after the preceding diode ON flip, for the falling edge to be used to place
+the frame after a held frame (`get_held_off_frame_refreshes`). A falling edge further off the
+refresh grid is late by part of a refresh (flip returned late). On-time falling edges are
+within 0.1 refresh (0.1 - 99.9th percentile)."""
+
 DisplayTimeSource: TypeAlias = Literal["photodiode", "constant_lag", "unavailable"]
 Fallback: TypeAlias = Literal["constant_lag"] | None
 
@@ -1472,6 +1499,103 @@ def discard_erroneous_diode_flips_at_stim_offset(
     return diode_flips
 
 
+def get_held_off_frame_refreshes(
+    vsync_times: npt.NDArray,
+    vsync_rising_times: npt.NDArray | None,
+    on_flip_times: npt.NDArray,
+    is_first_frame_off: bool,
+    refresh_interval: float,
+) -> npt.NDArray[np.float64]:
+    """For each diode ON flip (diodeBoxFrameInterval 1): the number of refreshes from the ON
+    flip to the display of the next frame (the OFF frame), from the frame signal alone, or NaN
+    if the frame signal can't tell.
+
+    Used by `get_frame_display_times` to place the OFF frame inside a long ON-ON interval (a
+    held frame), where the time of the diode's OFF (falling) edge isn't reliable: while a white
+    sync square is held, its measured luminance sags or flickers (phantom flicker), so after a
+    hold of 2 or more refreshes the OFF edge can come more than half a refresh early, and from
+    the edge alone the OFF frame is then placed a refresh early.
+
+    - `vsync_times`: vsync falling edges, one per frame, + `AVERAGE_VSYNC_TO_DIODE_FLIP_TIME`
+    - `vsync_rising_times`: frame-signal rising edge of each frame (None: all NaN returned)
+    - `on_flip_times`: diode ON (rising) flips: flip i is display index 2 * i +
+      `is_first_frame_off`
+
+    The frame signal goes high, the frame is drawn and flipped, and the signal goes low when
+    `flip()` returns, at the vertical blank where the frame was swapped in. The frame is on
+    screen one latency later, like every other frame: this is what vsync + constant lag
+    assumes. The exception is a late return: the swap happens on time but `flip()` returns
+    late, by up to a refresh or more, and the frame is on screen before its falling edge +
+    latency. So the falling edge is used only if:
+
+    1. the frame's pulse (rising to falling edge) is shorter than `HELD_FRAME_MAX_PULSE`
+       refreshes. A late return of a whole refresh makes the pulse at least a refresh longer
+       than the wait for the vertical blank;
+    2. falling edge + latency is within `HELD_FRAME_GRID_TOLERANCE` refreshes of a whole
+       number of refreshes after the ON flip (a return late by part of a refresh isn't).
+
+    Otherwise the result is NaN, and `get_frame_display_times` uses the diode's OFF edge, as
+    npc_stim <= 0.1.29 did for every held frame.
+
+    The latency is the block's own: the median of (ON flip - vsync falling edge) over the
+    block, which also gives the index offset between diode flips and vsyncs when the first
+    flip of the block is missing or extra (-1, 0 or +1 frame, corrected at the end of
+    `get_frame_display_times`). All NaN if the offset is anything else.
+
+    Evidence (hub/experiments/npc-stim-held-frames): ON frames have the same frame-signal
+    timing as OFF frames and their display time is measured (the diode's rising edge is
+    reliable), so they show when a frame's falling edge can be trusted; the NI-DAQ analog
+    photodiode (2025 sessions) shows the OFF frames directly.
+
+    >>> R = 1 / 60
+    >>> falling = np.arange(10) * R
+    >>> falling[5:] += 2 * R                     # frame 4 (ON) held for 3 refreshes
+    >>> v = falling + AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    >>> on = v[::2] + 0.0005                     # diode ON flips 0.5 ms after vsync + latency
+    >>> rising = falling - 0.9 * R
+    >>> get_held_off_frame_refreshes(v, rising, on, False, R).tolist()
+    [1.0, 1.0, 3.0, 1.0, 1.0]
+    >>> rising[5] = falling[5] - 2.9 * R         # frame 5: pulse of 2.9 refreshes
+    >>> get_held_off_frame_refreshes(v, rising, on, False, R).tolist()
+    [1.0, 1.0, nan, 1.0, 1.0]
+    """
+    n_refreshes = np.full(len(on_flip_times), np.nan)
+    if vsync_rising_times is None or not len(on_flip_times):
+        return n_refreshes
+    vsync_times = np.asarray(vsync_times, dtype=float)
+    vsync_rising_times = np.asarray(vsync_rising_times, dtype=float)
+    on_frame_idx = 2 * np.arange(len(on_flip_times)) + int(is_first_frame_off)
+    is_in_block = on_frame_idx < len(vsync_times)
+    if not is_in_block.any():
+        return n_refreshes
+    # vsync_times include the average latency: the median is the offset in frames, plus
+    # this block's difference from the average latency
+    median_latency = float(
+        np.median(on_flip_times[is_in_block] - vsync_times[on_frame_idx[is_in_block]])
+    )
+    frame_offset = round(median_latency / refresh_interval)
+    if abs(frame_offset) > 1:
+        return n_refreshes
+    latency = median_latency - frame_offset * refresh_interval
+    off_vsync_idx = on_frame_idx + 1 + frame_offset
+    has_vsync = (off_vsync_idx >= 0) & (
+        off_vsync_idx < min(len(vsync_times), len(vsync_rising_times))
+    )
+    k = off_vsync_idx[has_vsync]
+    # the rising edges are as measured: remove the average latency from the falling edges
+    pulse = (
+        vsync_times[k] - AVERAGE_VSYNC_TO_DIODE_FLIP_TIME - vsync_rising_times[k]
+    ) / refresh_interval
+    refreshes = (vsync_times[k] + latency - on_flip_times[has_vsync]) / refresh_interval
+    is_usable = (
+        (pulse > 0)
+        & (pulse < HELD_FRAME_MAX_PULSE)
+        & (np.abs(refreshes - np.round(refreshes)) < HELD_FRAME_GRID_TOLERANCE)
+    )
+    n_refreshes[has_vsync] = np.where(is_usable, np.round(refreshes), np.nan)
+    return n_refreshes
+
+
 def get_frame_display_times(
     vsync_times: npt.NDArray,
     on_flip_times: npt.NDArray,
@@ -1494,7 +1618,22 @@ def get_frame_display_times(
       time (99.4% of 23,281 isolated late falling edges in box-1 blocks, TTL and NI-DAQ AI0:
       npc_sessions experiments/phantom-flicker/late_return_check.log; most of these delays don't
       reach PsychoPy's frameIntervals). Used when diodeBoxFrameInterval > 1 to place frames within
-      a diode interval that contains dropped refreshes.
+      a diode interval that contains dropped refreshes, and when it is 1 to place the OFF frame
+      after a held ON frame (below).
+
+    diodeBoxFrameInterval 1: ON frames get their diode (rising) flip. An OFF frame is put
+    halfway between its neighbours, except in an ON-ON interval of 3 or more refreshes (a frame
+    was held), where the refreshes are split between the ON and the OFF frame:
+
+    - from the OFF frame's vsync falling edge, if its frame-signal pulse shows that the
+      falling edge isn't late (`get_held_off_frame_refreshes`; needs `vsync_rising_times`)
+    - otherwise from the time of the diode's OFF edge, `asym_round(..., 0.9)`, as npc_stim
+      <= 0.1.29 did for every held frame. The OFF edge after a held white square can come
+      more than half a refresh early (phantom flicker below the comparator threshold), which
+      put the OFF frame a refresh early, and failed blocks with many such frames ("Too many
+      frames are misaligned with vsyncs").
+
+    The two agree for all but those frames, so blocks without them are unchanged.
     """
     # first, shift vsyncs forwards in time by the monitor latency, so we can more easily match up
     # diode flips and vsyncs
@@ -1563,6 +1702,16 @@ def get_frame_display_times(
 
             median_refresh_interval = np.median(on_intervals) / 2
 
+            # refreshes from each ON flip to the next (OFF) frame according to the frame
+            # signal: NaN where it can't tell
+            frame_signal_refreshes_to_off = get_held_off_frame_refreshes(
+                vsync_times=vsync_times,
+                vsync_rising_times=vsync_rising_times,
+                on_flip_times=on_flip_times,
+                is_first_frame_off=bool(is_first_frame_off),
+                refresh_interval=median_refresh_interval,
+            )
+
             for idx in np.where(on_intervals > 2.5 * median_refresh_interval)[0]:
 
                 # get the off frame idx we're going to adjust:
@@ -1604,6 +1753,12 @@ def get_frame_display_times(
                     off_flip_times[off_frame_idx] - on_flip_times[idx]
                 ) / median_refresh_interval
                 n_frames_to_off = asym_round(frames_to_off, 0.9, allow_zero=False)
+                # the OFF edge can be early after a held ON frame: use the OFF frame's vsync
+                # falling edge where the frame signal shows it isn't late
+                if 1 <= frame_signal_refreshes_to_off[idx] < n_refresh_in_interval:
+                    n_frames_to_off = np.asarray(
+                        int(frame_signal_refreshes_to_off[idx])
+                    )
                 assert n_frames_to_off >= 1, "Trying to place OFF at ON frame"
                 assert (
                     n_frames_to_off < n_refresh_in_interval
