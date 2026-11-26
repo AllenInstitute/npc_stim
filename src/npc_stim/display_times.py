@@ -821,7 +821,9 @@ def get_display_times(
                     else None
                 ),
                 source=(
-                    "constant_lag" if block_fallback == "constant_lag" else "unavailable"
+                    "constant_lag"
+                    if block_fallback == "constant_lag"
+                    else "unavailable"
                 ),
                 diode_box_frame_interval=vsyncs_per_diode_flip,
                 reason=reason,
