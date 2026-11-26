@@ -948,8 +948,9 @@ def get_display_times(
 
         if len(estimate.invented_frames):
             invented_note = (
-                f"{len(estimate.invented_frames)} frame(s) at the end of the block have no "
-                "diode flip and are given vsync + the block's median latency (frame_source 2): "
+                f"{len(estimate.invented_frames)} frame(s) without a measured or supported diode "
+                "flip (at the end of the block, or an unsupported first OFF frame) are given "
+                "vsync + the block's median latency (frame_source 2): "
                 "frame(s) " + ", ".join(str(int(i)) for i in estimate.invented_frames)
             )
             logger.warning(f"{stim_id}: Block {block_idx}: {invented_note}")
@@ -1161,6 +1162,12 @@ def _estimate_block_display_times(
                         if np.all(np.diff(times) > 0)
                         else f"{problem} (vsync + constant lag for them is out of order)"
                     )
+        if problem is None and vsyncs_per_diode_flip == 1 and not is_first_frame_on:
+            times, first_replaced = replace_unsupported_first_frame(
+                times, vsyncs, vsync_rising_edges
+            )
+            if first_replaced:
+                invented = np.union1d(invented, [0]).astype(np.intp)
         if problem is None:
             problem = get_residual_step_problem(times, vsyncs)
         if problem is not None:
@@ -1586,6 +1593,45 @@ def reconcile_box1_frame_count(
             "for the missing frames at the end is out of order",
         )
     return times, invented, None
+
+
+def replace_unsupported_first_frame(
+    display_times: npt.NDArray[np.float64],
+    vsyncs: npt.NDArray[np.float64],
+    vsync_rising_edges: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], bool]:
+    """Box-1 blocks whose first frame is an OFF frame: its display time isn't measured (there's
+    no ON-ON interval around it, so it is extrapolated from the first ON interval), and is
+    wrong if the frame was held. If it is half a refresh or more from the block's median
+    latency relative to *both* its vsync falling edge and its rising edge, nothing supports it:
+    it gets vsync + the block's median latency (and is marked like the invented end frames,
+    `frame_source` 2). (666986_2023-08-17 and 5 other 2023 RFMapping blocks: frame 0, an RF stim
+    onset, held for 3 refreshes, was placed 30-34 ms late.)
+
+    >>> v = np.arange(100) / 59.95
+    >>> t = v + 0.0275
+    >>> t[0] += 0.030
+    >>> out, replaced = replace_unsupported_first_frame(t, v, v - 0.0155)
+    >>> replaced, round(float(out[0] - v[0]), 4)
+    (True, 0.0275)
+    """
+    latency = display_times - vsyncs
+    rise_latency = display_times - vsync_rising_edges
+    med, rise_med = float(np.median(latency)), float(np.median(rise_latency))
+    half = 0.5 * FRAME_INTERVAL
+    if abs(latency[0] - med) < half or abs(rise_latency[0] - rise_med) < half:
+        return display_times, False
+    replacement = vsyncs[0] + med
+    if len(display_times) > 1 and replacement >= display_times[1]:
+        return display_times, False
+    out = display_times.copy()
+    out[0] = replacement
+    logger.warning(
+        f"first (OFF) frame's extrapolated display time is {(display_times[0] - replacement) * 1e3:+.1f} ms "
+        "from its vsync + the median latency, and disagrees with its rising edge too: "
+        "replaced with vsync + median latency"
+    )
+    return out, True
 
 
 def get_residual_step_problem(
