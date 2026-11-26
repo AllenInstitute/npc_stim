@@ -156,6 +156,12 @@ def get_running_speed_from_hdf5(
             f"No rotaryEncoderIndex in {stim_path}: skipped encoder reads can only be "
             "detected by speed threshold"
         )
+    elif index.shape != count.shape:
+        logger.warning(
+            f"rotaryEncoderIndex shape {index.shape} does not match rotaryEncoderCount "
+            f"shape {count.shape} in {stim_path}: realigning index to count"
+        )
+        index = align_encoder_index_to_count(index, count)
     speed = get_running_speed_from_encoder_count(
         count,
         counts_per_rev=d["rotaryEncoderCountsPerRev"][()],
@@ -165,6 +171,54 @@ def get_running_speed_from_hdf5(
     if (n := np.isnan(speed[1:]).sum()) > 0:
         logger.info(f"{n} running speed samples are NaN in {stim_path}")
     return speed
+
+
+def align_encoder_index_to_count(
+    index: npt.ArrayLike, count: npt.ArrayLike
+) -> npt.NDArray[np.floating]:
+    """Remove spurious entries from `rotaryEncoderIndex` so it aligns with `rotaryEncoderCount`.
+
+    TaskControl.readDigitalEncoder appends the parsed index, then the parsed count, and on any
+    exception appends NaN to both. If the serial line is garbled such that the index parses but
+    the count doesn't, `index` gets [value, NaN] for that frame while `count` gets [NaN]: `index`
+    accumulates one extra entry per occurrence, always immediately before one of its NaNs.
+    `count` has one entry per frame and is the reference.
+
+    >>> index = [0, 1, 2, 3, np.nan, 5, 6]
+    >>> count = [0, 1, 2, np.nan, 5, 6]
+    >>> align_encoder_index_to_count(index, count)
+    array([ 0.,  1.,  2., nan,  5.,  6.])
+
+    Ambiguous cases raise:
+    >>> align_encoder_index_to_count([0, 1, 2, 3], [0, 1, 2])
+    Traceback (most recent call last):
+    ...
+    ValueError: Cannot align rotaryEncoderIndex (4,) to rotaryEncoderCount (3,)
+    """
+    index = np.asarray(index, dtype=np.float64)
+    count = np.asarray(count, dtype=np.float64)
+    if index.shape == count.shape:
+        return index
+    error = ValueError(
+        f"Cannot align rotaryEncoderIndex {index.shape} to rotaryEncoderCount {count.shape}"
+    )
+    n_extra = index.size - count.size
+    index_nan = np.flatnonzero(np.isnan(index))
+    count_nan = np.flatnonzero(np.isnan(count))
+    if n_extra < 0 or index_nan.size != count_nan.size or index_nan.size == 0:
+        raise error
+    offsets = index_nan - count_nan
+    steps = np.diff(offsets, prepend=0)
+    if not np.all((steps == 0) | (steps == 1)) or offsets[-1] != n_extra:
+        raise error
+    keep = np.ones(index.size, dtype=bool)
+    keep[index_nan[steps == 1] - 1] = False
+    aligned = index[keep]
+    if aligned.shape != count.shape or not np.array_equal(
+        np.isnan(aligned), np.isnan(count)
+    ):
+        raise error
+    return aligned
 
 
 def get_running_speed_from_encoder_count(

@@ -108,6 +108,27 @@ def test_index_shape_mismatch_raises() -> None:
         _speed(count, index[:-1])
 
 
+def test_align_index_partial_parse_failures() -> None:
+    """Index parsed but count failed -> index gets [value, NaN], count gets [NaN]
+    (736803_2024-08-13: index 2 longer than count)."""
+    count, index = _steady()
+    count, index = count.astype(float), index.astype(float)
+    count[[20, 40]] = np.nan
+    index[[20, 40]] = np.nan
+    garbled = np.insert(index, [20, 40], [index[19] + 1, index[39] + 1])
+    assert garbled.size == count.size + 2
+    aligned = running.align_encoder_index_to_count(garbled, count)
+    assert aligned.shape == count.shape
+    assert np.array_equal(np.isnan(aligned), np.isnan(count))
+    assert np.array_equal(aligned[~np.isnan(aligned)], index[~np.isnan(index)])
+
+
+def test_align_index_unexplained_mismatch_raises() -> None:
+    count, index = _steady()
+    with pytest.raises(ValueError):
+        running.align_encoder_index_to_count(index, count[:-1])
+
+
 def test_m_per_s(monkeypatch) -> None:
     monkeypatch.setattr(running, "RUNNING_SPEED_UNITS", "m/s")
     count, index = _steady()
