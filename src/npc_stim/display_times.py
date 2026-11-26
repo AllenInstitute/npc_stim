@@ -2195,12 +2195,16 @@ def get_frame_display_times(
                 long_refreshes = [1]
             else:
                 assert n_dropped > 0
-                # figure out how many frames were dropped,
-                # and how many screen refreshes dropped for each
-                long_thr = 1.1 * FRAME_INTERVAL
-                long_idx = np.where(vsync_intervals > long_thr)[0].tolist()
-                long_refreshes = np.round(vsync_intervals[long_idx] / FRAME_INTERVAL)
-                # long_refreshes is number of screen refreshes for each dropped frame
+                # figure out which frames were held, and how many refreshes were dropped
+                # after each: a vsync interval of k refreshes is k - 1 dropped refreshes.
+                # (npc_stim <= 0.1.32 used k, so with 2+ dropped refreshes the counts never
+                # added up and were re-apportioned: a frame held for 3 refreshes in a box-3
+                # interval was split as 2 + 2, putting the next frame - often an RFMapping
+                # stim onset - a refresh early: 807082_2025-09-30 RFMapping frame 22010)
+                dropped_per_interval = np.round(vsync_intervals / FRAME_INTERVAL) - 1
+                long_idx = np.flatnonzero(dropped_per_interval > 0).tolist()
+                long_refreshes = dropped_per_interval[long_idx]
+                # long_refreshes is the number of dropped screen refreshes after each held frame
                 if sum(long_refreshes) != n_dropped:
                     if len(long_refreshes) == 1:
                         assert long_refreshes[0] != n_dropped
@@ -2221,7 +2225,7 @@ def get_frame_display_times(
                             # Place frames with `place_frames_in_diode_interval` below.
                             long_idx = None
                     else:
-                        msg = f"{stim_id} | Faulty locating of dropped frames - something doesn't add up: {vsync_intervals=}, {long_refreshes=} ({long_thr=})"
+                        msg = f"{stim_id} | Faulty locating of dropped frames - something doesn't add up: {vsync_intervals=}, {long_refreshes=}"
                         if (
                             vsyncs_per_flip > 30
                         ):  # we're potentially mis-aligning many frames here
@@ -2256,6 +2260,24 @@ def get_frame_display_times(
                 ) * vsyncs_per_flip <= len(vsync_rising_times):
                     lower_bound = (
                         vsync_rising_times[frames] + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+                    )
+                    # where the frame-signal pulse is short, the falling edge isn't late: it
+                    # marks the vertical blank where the frame was swapped in, so the frame
+                    # can't be on screen sooner than the min latency after it (as for held
+                    # frames in box-1 blocks: see `HELD_FRAME_MAX_PULSE`). Without this, a
+                    # late-falling-edge long/short pair of vsync intervals next to a held frame
+                    # could still put the next frame a refresh early
+                    falling = vsync_times[frames] - AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+                    short_pulse = (
+                        falling - vsync_rising_times[frames]
+                        <= HELD_FRAME_MAX_PULSE * FRAME_INTERVAL
+                    )
+                    lower_bound = np.where(
+                        short_pulse,
+                        np.maximum(
+                            lower_bound, falling + MIN_VSYNC_DIODE_FLIP_SEPARATION_SEC
+                        ),
+                        lower_bound,
                     )
                 else:
                     lower_bound = np.full(vsyncs_per_flip, -np.inf)

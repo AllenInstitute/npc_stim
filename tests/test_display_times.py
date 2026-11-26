@@ -345,3 +345,27 @@ def test_missing_and_extra_flip_mid_block_fail_step_check() -> None:
     t[1000:3000] += 1 / 59.95
     problem = npc_stim.display_times.get_residual_step_problem(t, v)
     assert problem is not None and "1000-2999" in problem
+
+
+def test_box3_frame_held_for_3_refreshes_next_frame_not_early() -> None:
+    """Box-3 group with one frame held for 3 refreshes (2 dropped) and a late falling edge on
+    the next group's first frame (807082_2025-09-30 RFMapping frame 22010). npc_stim <= 0.1.32
+    counted a 3-refresh vsync interval as 3 dropped refreshes, re-apportioned them as 1 + 1,
+    and put the frame after the held one a refresh early."""
+    R = npc_stim.display_times.FRAME_INTERVAL
+    lag = npc_stim.display_times.AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    slots = np.array([0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])  # frame 4 held
+    display = 1 + slots * R
+    falling = display - lag
+    rising = falling - 0.0159
+    falling[6] += 0.0047  # late falling edge (long pulse) on the next group's first frame
+    # box 3: the diode toggles on frames 0, 3, 6, 9, 12 (+ the end of the last group)
+    toggles = np.append(display[::3], display[-1] + R)
+    times = npc_stim.display_times.get_frame_display_times(
+        vsync_times=falling,
+        on_flip_times=toggles[0::2],
+        off_flip_times=toggles[1::2],
+        vsyncs_per_flip=3,
+        vsync_rising_times=rising,
+    )
+    assert np.allclose(times[:15], display, atol=1e-4), np.round((times[:15] - display) / R, 2)
