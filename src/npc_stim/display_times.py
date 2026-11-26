@@ -653,6 +653,34 @@ def _get_block_to_stim_path(
     return npc_stim.stim.get_stim_block_to_path(tuple(stim_paths), sync_data)
 
 
+STIMS_WITHOUT_DISPLAY_TIMED_VISUAL_STIMS: tuple[str, ...] = (
+    "Spontaneous",
+    "SpontaneousRewards",
+    "OptoTagging",
+)
+"""Stim scripts whose blocks aren't rejected for photodiode / display-time problems alone:
+they get vsync + `CONSTANT_MONITOR_LAG` (`source='constant_lag'`) whatever `fallback` is.
+Spontaneous and SpontaneousRewards show no visual stim (their rewards and licks are timed by
+sync lines, or by frame indices on the vsyncs), and OptoTagging's stim onsets and offsets are
+on the laser lines of sync. Their frame times only need the vsyncs to be right: a block
+overlapping a span where the SyncPatch couldn't reconstruct the vsync line still gets no
+display times (its frames can't be indexed), but one where only the photodiode is unknown
+does."""
+
+
+def has_display_timed_visual_stims(stim_path: npc_io.PathLike) -> bool:
+    """False for stims in `STIMS_WITHOUT_DISPLAY_TIMED_VISUAL_STIMS` (by script name: the
+    file name up to the first underscore).
+
+    >>> has_display_timed_visual_stims("DynamicRouting1_733891_20240919_130255.hdf5")
+    True
+    >>> has_display_timed_visual_stims("SpontaneousRewards_733891_20240919_125243.hdf5")
+    False
+    """
+    name = npc_io.from_pathlike(stim_path).stem.split("_")[0]
+    return name not in STIMS_WITHOUT_DISPLAY_TIMED_VISUAL_STIMS
+
+
 def get_display_times(
     sync: npc_sync.SyncPathOrDataset,
     stim_paths: Iterable[npc_io.PathLike] | Mapping[int, npc_io.PathLike | None],
@@ -681,6 +709,10 @@ def get_display_times(
       retried from the first vsync's rising edge (recorded in `notes`)
     - `raise_on_error`: re-raise errors from the estimator instead of recording the block as
       not using the photodiode.
+    - stims without visual stims timed by display times (`STIMS_WITHOUT_DISPLAY_TIMED_VISUAL_STIMS`:
+      Spontaneous, SpontaneousRewards, OptoTagging) always get the constant-lag fallback,
+      also with `fallback=None`, and also where only the photodiode line is unknown in a
+      replayed span: they aren't rejected for display-time problems alone.
 
     Raises `AssertionError` if the sync file contains replayed data not covered by a
     `SyncPatch`, or a timebase discontinuity (see `assert_sync_frame_timing_is_valid`). With
@@ -693,10 +725,12 @@ def get_display_times(
     patched = bool(sync_data.invalid_intervals) and _is_patched_for_display_times(
         sync_data
     )
+    unknown_vsync: list = []
     if patched:
-        unknown = sync_data.get_unknown_intervals(
-            "vsync_stim"
-        ) + sync_data.get_unknown_intervals("stim_photodiode")
+        unknown_vsync = list(sync_data.get_unknown_intervals("vsync_stim"))
+        unknown = unknown_vsync + list(
+            sync_data.get_unknown_intervals("stim_photodiode")
+        )
         all_vsyncs = sync_data.get_falling_edges("vsync_stim", units="seconds")
         vsync_src = sync_data.get_edge_sources("vsync_stim", "falling")
         diode_src = np.concatenate(
@@ -739,12 +773,22 @@ def get_display_times(
         )
     ):
         stim_path = block_to_stim_path.get(block_idx)
+        needs_display_times = stim_path is None or has_display_timed_visual_stims(
+            stim_path
+        )
+        block_fallback: Fallback = fallback if needs_display_times else "constant_lag"
+
+        def overlaps(spans: Sequence[tuple[float, float]]) -> bool:
+            return patched and any(
+                a <= vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC and z >= vsyncs[0]
+                for a, z in spans
+            )
 
         # a block overlapping a span where the SyncPatch couldn't reconstruct vsync/photodiode
-        # gets no display times, even with a fallback: its vsyncs can't be trusted either
-        overlaps_unknown = patched and any(
-            a <= vsyncs[-1] + MAX_VSYNC_DIODE_FLIP_SEPARATION_SEC and z >= vsyncs[0]
-            for a, z in unknown
+        # gets no display times, even with a fallback: its vsyncs can't be trusted either.
+        # Stims without display-timed visual stims only need the vsyncs.
+        overlaps_unknown = overlaps(unknown if patched else []) and (
+            needs_display_times or overlaps(unknown_vsync)
         )
 
         def unavailable(reason: str) -> BlockDisplayTimes:
@@ -761,7 +805,7 @@ def get_display_times(
             reason: str, vsyncs_per_diode_flip: int | None
         ) -> BlockDisplayTimes:
             check = None
-            if fallback == "constant_lag":
+            if block_fallback == "constant_lag":
                 check = get_frame_index_check(vsyncs, stim_path)
                 logger.log(
                     logging.INFO if check.passed else logging.WARNING,
@@ -773,14 +817,18 @@ def get_display_times(
                 vsync_times=vsyncs,
                 display_times=(
                     vsyncs + CONSTANT_MONITOR_LAG
-                    if fallback == "constant_lag"
+                    if block_fallback == "constant_lag"
                     else None
                 ),
-                source="constant_lag" if fallback == "constant_lag" else "unavailable",
+                source=(
+                    "constant_lag" if block_fallback == "constant_lag" else "unavailable"
+                ),
                 diode_box_frame_interval=vsyncs_per_diode_flip,
                 reason=reason,
                 frame_source=(
-                    frame_source(vsyncs, None) if fallback == "constant_lag" else None
+                    frame_source(vsyncs, None)
+                    if block_fallback == "constant_lag"
+                    else None
                 ),
                 frame_index_check=check,
             )

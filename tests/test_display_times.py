@@ -220,7 +220,17 @@ def test_frame_index_check_only_for_constant_lag_blocks() -> None:
     assert task.source == "constant_lag"
     assert task.frame_index_check.passed is True
     assert (task.frame_index_check.n_long_sync, task.frame_index_check.n_same_index) == (221, 221)
-    assert all(b.frame_index_check is None for b in _display_times(sync))  # no fallback
+    # no fallback: only stims without display-timed visual stims (here SpontaneousRewards,
+    # whose photodiode is unusable) still get constant lag, with the check
+    no_fallback = _display_times(sync)
+    for b in no_fallback:
+        if b.stim_path is not None and not npc_stim.display_times.has_display_timed_visual_stims(b.stim_path):
+            assert b.source in ("photodiode", "constant_lag")
+            assert (b.frame_index_check is None) == (b.source == "photodiode")
+        else:
+            assert b.frame_index_check is None
+    assert any(b.source == "constant_lag" for b in no_fallback)
+    assert next(b for b in no_fallback if b.stim_path and "DynamicRouting1" in b.stim_path.name).source == "unavailable"
 
 
 def test_slow_processing_file() -> None:
