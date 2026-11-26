@@ -896,6 +896,18 @@ def get_display_times(
                 src = np.zeros(len(vsyncs), dtype=np.int8)
             src[estimate.early_frames] = 2
 
+        if len(estimate.invented_frames):
+            invented_note = (
+                f"{len(estimate.invented_frames)} frame(s) at the end of the block have no "
+                "diode flip and are given vsync + the block's median latency (frame_source 2): "
+                "frame(s) " + ", ".join(str(int(i)) for i in estimate.invented_frames)
+            )
+            logger.warning(f"{stim_id}: Block {block_idx}: {invented_note}")
+            notes = invented_note if notes is None else f"{notes}; {invented_note}"
+            if src is None:
+                src = np.zeros(len(vsyncs), dtype=np.int8)
+            src[estimate.invented_frames] = 2
+
         results.append(
             BlockDisplayTimes(
                 block_index=block_idx,
@@ -938,6 +950,11 @@ class _BlockEstimate:
     early_frames: npt.NDArray[np.intp] = dataclasses.field(
         default_factory=lambda: np.array([], dtype=np.intp)
     )
+    invented_frames: npt.NDArray[np.intp] = dataclasses.field(
+        default_factory=lambda: np.array([], dtype=np.intp)
+    )
+    """Frames at the end of a box-1 block without a diode flip, given vsync + the block's
+    median latency (see `reconcile_box1_frame_count`)."""
     """Frames given vsync + constant lag (see `MAX_EARLY_FRAMES`)."""
 
 
@@ -1058,43 +1075,14 @@ def _estimate_block_display_times(
         )
         return fail(f"estimator failed: {exc!r}")
 
-    if vsyncs_per_diode_flip == 1:
-        while len(times) < len(vsyncs):
-            if len(vsyncs) - len(times) > 3:
-                # previously raised from `get_display_times`, failing the whole sync file
-                msg = (
-                    f"{len(times)} frame display times, but {len(vsyncs)} vsyncs: too many "
-                    "missing frames"
-                )
-                if raise_on_error:
-                    raise AssertionError(f"{stim_id}: Block {block_idx} has {msg}")
-                return fail(msg)
-            n_times = len(times)
-            times = add_missing_diode_flips_for_truncated_sync(times, vsyncs)
-            if len(times) == n_times:
-                # nothing added: the last flip is already later than the last vsync + the mean
-                # latency, so the missing flips aren't at the end of the block (previously
-                # looped forever: 60-s chunks of 712815_2024-05-23 and 726088_2024-06-20)
-                msg = (
-                    f"{len(times)} frame display times, but {len(vsyncs)} vsyncs, and the "
-                    "missing diode flips aren't at the end of the block"
-                )
-                if raise_on_error:
-                    raise AssertionError(f"{stim_id}: Block {block_idx} has {msg}")
-                return fail(msg)
-
-        if (len(times) == len(vsyncs) + 1) and times[-1] > vsyncs[-1] + (
-            times[:-1] - vsyncs
-        ).mean():
-            # special case where we have an extra flip at the end, which doesn't correspond to a vsync
-            # - can happen if the last frame's sync square is high and the screen then returns to black
-            times = times[:-1]
-        if len(times) - len(vsyncs) < 5:
-            # if we have a few more frames than vsyncs, we can assume these are just extra frames
-            # at the end of the block caused by spontaneous flicker, so we remove them
-            times = times[: len(vsyncs)]
-        if len(times) != len(vsyncs):
-            return fail(f"{len(times)} frame display times, but {len(vsyncs)} vsyncs")
+    invented = np.array([], dtype=np.intp)
+    if vsyncs_per_diode_flip == 1 and len(times) != len(vsyncs):
+        reconciled, invented, problem = reconcile_box1_frame_count(times, vsyncs)
+        if problem is not None:
+            if raise_on_error:
+                raise AssertionError(f"{stim_id}: Block {block_idx}: {problem}")
+            return fail(problem)
+        times = reconciled
 
     early = np.array([], dtype=np.intp)
     if len(times) == len(vsyncs):
@@ -1123,11 +1111,16 @@ def _estimate_block_display_times(
                         if np.all(np.diff(times) > 0)
                         else f"{problem} (vsync + constant lag for them is out of order)"
                     )
+        if problem is None:
+            problem = get_residual_step_problem(times, vsyncs)
         if problem is not None:
             return fail(problem)
 
     return _BlockEstimate(
-        times, diode_box_frame_interval=vsyncs_per_diode_flip, early_frames=early
+        times,
+        diode_box_frame_interval=vsyncs_per_diode_flip,
+        early_frames=early,
+        invented_frames=invented,
     )
 
 
@@ -1434,6 +1427,164 @@ def adjust_diode_flip_intervals(
         diode_flips[idx] -= sign * 0.5 * deviation
         diode_flips[idx + 1] += sign * 0.5 * deviation
     return diode_flips
+
+
+MAX_MISSING_END_FLIPS = 3
+"""Most frames at the end of a box-1 block that may lack a diode flip (e.g. the sync recording
+stopped, or the last sync squares weren't detected): they get vsync + the block's median
+latency, marked in `frame_source`. See `reconcile_box1_frame_count`."""
+
+MAX_EXTRA_END_FLIPS = 4
+"""Most diode flips after the display of a box-1 block's last frame that are discarded (e.g.
+the transition from the last sync square to the grey screen). See
+`reconcile_box1_frame_count`."""
+
+END_CHECK_FRAMES = 50
+"""Frames at the end of a box-1 block whose latency (display - vsync) is compared with the
+block's median latency before frames are added or removed at the end (see
+`reconcile_box1_frame_count`)."""
+
+RESIDUAL_STEP_WINDOW = 301
+"""Frames in the running median of display - vsync latency used to find stretches of a block
+whose flips are assigned to the wrong frames (`get_residual_step_problem`)."""
+
+
+def reconcile_box1_frame_count(
+    display_times: npt.NDArray[np.float64],
+    vsyncs: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.intp], str | None]:
+    """Make a box-1 block's display times (one per diode flip, from
+    `get_frame_display_times`) one per vsync, if the extra or missing flips are verifiably at
+    the end of the block.
+
+    Flips are assigned to frames in order, so a flip missing (or extra) in the middle of the
+    block puts every later frame a refresh late (early). Before npc_stim 0.1.32 up to 3
+    missing display times were invented and up to 4 extra ones dropped at the end without
+    checking where the discrepancy was (npc_stim#9: in 733891_2024-09-18 the task block's
+    frames were 2 refreshes early from frame 213,257 to the end). Now:
+
+    - the latency (display - vsync) of the last `END_CHECK_FRAMES` frames that have a flip
+      must be within half a refresh of the block's median latency (otherwise the
+      discrepancy isn't at the end)
+    - extra flips (at most `MAX_EXTRA_END_FLIPS`) must come later than the last frame's
+      display time + half a refresh: they're dropped
+    - missing flips (at most `MAX_MISSING_END_FLIPS`) are frames at the end without a flip:
+      they get vsync + the block's median latency, and their indices are returned so they
+      can be marked
+
+    A discrepancy in the middle of a block that the end checks miss (e.g. one missing and
+    one extra flip) is caught by `get_residual_step_problem`.
+
+    Returns (display_times, invented frame indices, problem); problem is None if reconciled.
+
+    >>> v = np.arange(1000) / 59.95
+    >>> lag = AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    >>> t, inv, msg = reconcile_box1_frame_count(np.append(v + lag, v[-1] + lag + 1 / 59.95), v)
+    >>> msg is None and len(t) == 1000 and len(inv) == 0
+    True
+    >>> t, inv, msg = reconcile_box1_frame_count((v + lag)[:-2], v)
+    >>> msg is None, inv.tolist(), bool(np.allclose(t - v, lag))
+    (True, [998, 999], True)
+    >>> # a flip missing at frame 900: frames 900-998 are given the next frame's flip
+    >>> late = np.concatenate([(v + lag)[:900], (v + lag)[901:]])
+    >>> reconcile_box1_frame_count(late, v)[2]
+    '999 display times for 1000 vsyncs, but the latency of the last 50 frames with a flip is 16.7 ms from the block median: the missing flip(s) are not at the end of the block'
+    """
+    n_vsyncs, n_times = len(vsyncs), len(display_times)
+    common = min(n_vsyncs, n_times)
+    if common == 0:
+        return display_times, np.array([], dtype=np.intp), "no display times"
+    latency = display_times[:common] - vsyncs[:common]
+    median_latency = float(np.median(latency))
+    end_dev = float(np.median(latency[-END_CHECK_FRAMES:])) - median_latency
+    kind = "missing" if n_times < n_vsyncs else "extra"
+    if abs(end_dev) >= 0.5 * FRAME_INTERVAL:
+        return (
+            display_times,
+            np.array([], dtype=np.intp),
+            f"{n_times} display times for {n_vsyncs} vsyncs, but the latency of the last "
+            f"{min(END_CHECK_FRAMES, common)} frames with a flip is {end_dev * 1e3:.1f} ms from the "
+            f"block median: the {kind} flip(s) are not at the end of the block",
+        )
+    if n_times > n_vsyncs:
+        n_extra = n_times - n_vsyncs
+        last_display = vsyncs[-1] + median_latency
+        if n_extra > MAX_EXTRA_END_FLIPS or np.any(
+            display_times[n_vsyncs:] < last_display + 0.5 * FRAME_INTERVAL
+        ):
+            return (
+                display_times,
+                np.array([], dtype=np.intp),
+                f"{n_times} display times for {n_vsyncs} vsyncs: the {n_extra} extra flip(s) "
+                "aren't all after the display of the block's last frame",
+            )
+        return display_times[:n_vsyncs], np.array([], dtype=np.intp), None
+    n_missing = n_vsyncs - n_times
+    if n_missing > MAX_MISSING_END_FLIPS:
+        return (
+            display_times,
+            np.array([], dtype=np.intp),
+            f"{n_times} frame display times, but {n_vsyncs} vsyncs: too many missing frames",
+        )
+    invented = np.arange(n_times, n_vsyncs, dtype=np.intp)
+    times = np.concatenate([display_times, vsyncs[invented] + median_latency])
+    if not np.all(np.diff(times[n_times - 1 :]) > 0):
+        return (
+            display_times,
+            np.array([], dtype=np.intp),
+            f"{n_times} frame display times, but {n_vsyncs} vsyncs, and vsync + median latency "
+            "for the missing frames at the end is out of order",
+        )
+    return times, invented, None
+
+
+def get_residual_step_problem(
+    display_times: npt.NDArray[np.float64],
+    vsyncs: npt.NDArray[np.float64],
+    window: int = RESIDUAL_STEP_WINDOW,
+) -> str | None:
+    """None if the running median (over `window` frames) of the display - vsync latency stays
+    within half a refresh of the block's median latency; otherwise a description of the
+    stretch where it doesn't.
+
+    A stretch of frames whose diode flips are assigned one frame off (a flip missing in
+    one place and an extra one in another, or one missing in the middle of a block with
+    the count made up at the end) has a latency a whole refresh from the rest of the block.
+    Isolated frames with late vsync falling edges (see `get_frame_display_times`) don't move
+    the running median. Across the 2,072 photodiode blocks of 345 sessions in
+    hub experiments/timing-quartile (audit_display.py), 1 block had such a stretch
+    (706401_2024-04-24 SpontaneousRewards: the first 551 frames a refresh late, with the
+    missing flip invented at the end).
+
+    >>> v = np.arange(5000) / 59.95
+    >>> lag = AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    >>> get_residual_step_problem(v + lag, v) is None
+    True
+    >>> t = v + lag
+    >>> t[:1000] += 1 / 59.95
+    >>> get_residual_step_problem(t, v)
+    'display - vsync latency is 16.7 ms from the block median (19.6 ms) over frames 0-999 (running median of 301 frames): diode flips are assigned to the wrong frames there'
+    """
+    import scipy.ndimage
+
+    latency = display_times - vsyncs
+    if len(latency) < window:
+        return None
+    median_latency = float(np.median(latency))
+    running = scipy.ndimage.median_filter(latency, size=window, mode="reflect")
+    dev = running - median_latency
+    bad = np.flatnonzero(np.abs(dev) >= 0.5 * FRAME_INTERVAL)
+    if not len(bad):
+        return None
+    worst = float(dev[np.argmax(np.abs(dev))])
+    # the running median crosses half a refresh where the majority of the window does, so
+    # for a stretch longer than half a window this is its extent
+    first, last = int(bad[0]), int(bad[-1])
+    return (
+        f"display - vsync latency is {worst * 1e3:.1f} ms from the block median "
+        f"({median_latency * 1e3:.1f} ms) over frames {first}-{last} (running median of "
+        f"{window} frames): diode flips are assigned to the wrong frames there"
+    )
 
 
 def add_missing_diode_flips_for_truncated_sync(

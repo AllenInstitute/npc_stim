@@ -79,8 +79,9 @@ def test_missing_flips_not_at_end_of_block_fails_instead_of_hanging(
 ) -> None:
     """60 s (3600 frames) of the 712815_2024-05-23 task from 1143.6 s, times relative to the first
     vsync: the estimator returns 3597 display times and the last flip is already later than the
-    last vsync + the mean latency, so `add_missing_diode_flips_for_truncated_sync` adds nothing
-    and npc_stim <= 0.1.28 looped forever."""
+    last vsync + the mean latency, so `add_missing_diode_flips_for_truncated_sync` added nothing
+    and npc_stim <= 0.1.28 looped forever. Since 0.1.32 `reconcile_box1_frame_count` sees that the
+    last frames' latency is far from the block median (the missing flips aren't at the end)."""
     data = np.load(FIXTURES_DIR / "chunk_missing_flips_not_at_end.npz")
     result: list = []
 
@@ -109,12 +110,13 @@ def test_missing_flips_not_at_end_of_block_fails_instead_of_hanging(
     t.start()
     t.join(60)
     assert not t.is_alive(), "estimator is looping forever"
-    expected = "3597 frame display times, but 3600 vsyncs, and the missing diode flips aren't"
+    expected = "3597 display times for 3600 vsyncs, but the latency of the last 50 frames"
     if raise_on_error:
         assert isinstance(result[0], AssertionError) and expected in str(result[0])
     else:
         assert result[0].times is None
         assert expected in result[0].reason
+        assert "the missing flip(s) are not at the end of the block" in result[0].reason
         assert result[0].retryable  # so that `get_display_times` still tries the rising-edge window
 
 
@@ -296,3 +298,40 @@ def test_plots(tmp_path: pathlib.Path) -> None:
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
+
+
+# end-of-block reconciliation (npc_stim#9) ----------------------------------------- #
+
+
+def test_extra_flips_mid_block_are_not_truncated_at_end() -> None:
+    """Two extra flips in the middle of a box-1 block put every later frame 2 refreshes early
+    (733891_2024-09-18 task, npc_stim#9). npc_stim <= 0.1.31 truncated the 2 extra display times
+    at the end of the block; now the block is rejected."""
+    v = np.arange(5000) / 59.95
+    lag = npc_stim.display_times.AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    t = v + lag
+    # frames from 4000 get the flips of frames 2 earlier, and 2 frames' flips are left at the end
+    times = np.concatenate([t[:4000], t[3998:4000] + 0.002, t[4000:]])
+    times[4000:4002] = t[4000:4002] - 2 / 59.95  # the 2 extra flips
+    times = np.sort(times)
+    _, _, problem = npc_stim.display_times.reconcile_box1_frame_count(times, v)
+    assert problem is not None and "not at the end of the block" in problem
+
+
+def test_extra_flip_after_last_frame_is_dropped() -> None:
+    v = np.arange(5000) / 59.95
+    lag = npc_stim.display_times.AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    times = np.append(v + lag, v[-1] + lag + 1 / 59.95)  # transition to the grey screen
+    out, invented, problem = npc_stim.display_times.reconcile_box1_frame_count(times, v)
+    assert problem is None and len(invented) == 0
+    assert np.array_equal(out, v + lag)
+
+
+def test_missing_and_extra_flip_mid_block_fail_step_check() -> None:
+    """Counts match, but frames 1000-2999 are a refresh late: only the running-median check sees it"""
+    v = np.arange(5000) / 59.95
+    lag = npc_stim.display_times.AVERAGE_VSYNC_TO_DIODE_FLIP_TIME
+    t = v + lag
+    t[1000:3000] += 1 / 59.95
+    problem = npc_stim.display_times.get_residual_step_problem(t, v)
+    assert problem is not None and "1000-2999" in problem
